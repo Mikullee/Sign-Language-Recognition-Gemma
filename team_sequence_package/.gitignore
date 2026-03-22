@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+
+# Local caches
+.torch_cache/
+
+# Large generated outputs
+data/results/
+data/landmarks/
+data/hst_slr_custom/
+
+# Local clones / experiments
+_HST-SLR/
+_mediapipe_repo/
+
+# OS / editor
+.DS_Store
+Thumbs.db
