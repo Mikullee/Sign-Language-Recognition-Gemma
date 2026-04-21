@@ -13,7 +13,8 @@ Use this template for weekly planning and review.
 - New approved sequence videos: `__`
 - New annotated sequences (with timestamps): `__`
 - Low-token glosses improved (count): `__`
-- Gate A fixed 10-sentence pass count: `__/10`
+- Phase 1 metric target met (Yes/No): `__`
+- If met, Phase 2 (Qwen3.5-9B) integration status: `Not started / In progress / Done`
 
 ### 3) Execution Plan
 - Data:

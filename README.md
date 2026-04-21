@@ -14,9 +14,8 @@ This repository currently has two parallel tracks:
 2. BiGRU baseline training/inference artifacts
 
 Current strategy:
-- Gate A: verify 18 labels (including `BLANK`) can be recognized reliably
-- Gate B: connect `Qwen3.5-9B` for gloss-to-readable sentence generation
-- Gate C: expand gloss coverage only after A/B pass
+- Phase 1: improve low-token gloss recognition with measurable model metrics
+- Phase 2: after Phase 1 target is met, connect `Qwen3.5-9B` for gloss-to-readable sentence generation
 
 ## Start Here
 

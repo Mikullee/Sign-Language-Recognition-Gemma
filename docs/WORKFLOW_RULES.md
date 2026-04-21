@@ -34,7 +34,8 @@ Recommended settings for `main`:
 - Dismiss stale approvals when new commits are pushed
 - Restrict who can push to matching branches
 
-## 5) Gate Reminder
+## 5) Phase Reminder
 
-- Gate A not passed: do not start Gate B
-- Gate A + B not passed: do not expand gloss scope
+- Phase 1 first: prioritize low-token gloss recognition improvement with measurable metrics.
+- Start Phase 2 only after Phase 1 target is met.
+- Phase 2 scope: only gloss-to-readable sentence generation via `Qwen3.5-9B`.
