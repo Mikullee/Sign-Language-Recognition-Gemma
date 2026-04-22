@@ -1,74 +1,74 @@
-# Team Upload Playbook
+# 團隊上傳操作手冊
 
-This document defines exactly where to put files and what to push, so each member can continue work without blocking others.
+本文件定義「檔案放哪裡、哪些內容可以 push」，讓組員可以平行工作且不互相卡住。
 
-## Branch Roles
+## 分支職責
 
 1. `dev-agent-sync`
-- Purpose: collect new raw sequence videos
-- Allowed changes:
+- 用途：收新拍的 raw sequence 影片
+- 可變更內容：
   - `data/videos/raw_sequences/**`
   - `data/annotations/sequence_recording_manifest_300.csv`
-- Do not push approved data here
+- 不要把 approved 資料 push 到這裡
 
 2. `main`
-- Purpose: stable training-ready data
-- Allowed changes:
+- 用途：穩定可訓練資料
+- 可變更內容：
   - `data/videos/approved_sequences/**`
   - `data/annotations/sequence_review_checklist_300.csv`
   - `data/annotations/sequence_annotations_300_template.csv`
-- Merge by PR only
+- 只用 PR 合併，不直推
 
-## Required Folder Targets
+## 資料夾放置規則
 
-1. New recording (not reviewed yet)
+1. 新錄製（尚未審片）
 - `data/videos/raw_sequences/<sequence_id>/`
 
-2. Passed review
+2. 審片通過
 - `data/videos/approved_sequences/<sequence_id>/`
 
-3. Need rerecord
+3. 需要重錄
 - `data/videos/rerecord_needed/<sequence_id>/`
 
-## Batch Workflow
+## 批次作業流程
 
-1. Recorder
-- Upload raw videos to `raw_sequences`
-- Update `sequence_recording_manifest_300.csv` with status
+1. 錄影組
+- 影片上傳到 `raw_sequences`
+- 更新 `sequence_recording_manifest_300.csv` 的錄製狀態
 
-2. Reviewer
-- Mark result in `sequence_review_checklist_300.csv`
-- Move passed files to `approved_sequences`
-- Move failed files to `rerecord_needed`
+2. 審片組
+- 在 `sequence_review_checklist_300.csv` 記錄審核結果
+- 通過影片移到 `approved_sequences`
+- 不通過影片移到 `rerecord_needed`
 
-3. Annotator
-- Fill `start_sec`/`end_sec` in `sequence_annotations_300_template.csv`
+3. 標註組
+- 在 `sequence_annotations_300_template.csv` 填 `start_sec` / `end_sec`
 
-4. Pusher
-- Create one PR for one batch only
-- PR must include evidence links and changed scope
+4. 推送組
+- 一個批次開一個 PR
+- PR 需包含證據連結與變更範圍
 
-## Naming Rules
+## 命名規則
 
-1. Sequence video name format
+1. Sequence 影片命名格式
 - `SEQ##_X_##.mp4`
-- Example: `SEQ01_A_03.mp4`
+- 範例：`SEQ01_A_03.mp4`
 
-2. No spaces, no random suffixes
-- Avoid names like `final2`, `new`, `copy`
+2. 禁止空白與隨機後綴
+- 避免檔名如 `final2`、`new`、`copy`
 
-## Commit Message Format
+## Commit 格式
 
-Use structured prefix:
+請用結構化前綴：
 - `data: add raw batch ...`
 - `data: promote approved batch ...`
 - `anno: update timestamp annotation for batch ...`
 - `docs: update playbook/template ...`
 
-## Minimal Push Checklist
+## Push 前最小檢查清單
 
-1. Confirm branch is correct (`dev-agent-sync` or feature branch from `main`)
-2. Confirm only expected folders are changed
-3. Confirm no temp files are staged
-4. Confirm commit message uses structured prefix
-5. Push and open PR
+1. 確認分支正確（`dev-agent-sync` 或由 `main` 切出的功能分支）
+2. 確認只改到預期資料夾
+3. 確認沒有暫存檔被 stage
+4. 確認 commit 訊息符合規範
+5. push 並開 PR

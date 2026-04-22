@@ -1,33 +1,33 @@
-# Weekly Goals
+# 每週目標
 
-Use this template for weekly planning and review.
+請使用此模板做每週規劃與週末回顧。
 
-## Week: YYYY-MM-DD ~ YYYY-MM-DD
+## 週期：YYYY-MM-DD ~ YYYY-MM-DD
 
-### 1) This Week Objectives (max 3)
-- [ ] Objective 1
-- [ ] Objective 2
-- [ ] Objective 3
+### 1) 本週目標（最多 3 項）
+- [ ] 目標 1
+- [ ] 目標 2
+- [ ] 目標 3
 
-### 2) Quantitative Targets
-- New approved sequence videos: `__`
-- New annotated sequences (with timestamps): `__`
-- Low-token glosses improved (count): `__`
-- Phase 1 metric target met (Yes/No): `__`
-- If met, Phase 2 (Qwen3.5-9B) integration status: `Not started / In progress / Done`
+### 2) 量化指標
+- 新增 approved sequence 影片：`__`
+- 新增完成時間標註的 sequence：`__`
+- 低 token gloss 改善數量：`__`
+- Phase 1 指標是否達標（Yes/No）：`__`
+- 若達標，Phase 2（Qwen3.5-9B）整合狀態：`未開始 / 進行中 / 完成`
 
-### 3) Execution Plan
-- Data:
-- Training:
-- Evaluation:
-- Documentation:
+### 3) 執行計畫
+- 資料：
+- 訓練：
+- 評估：
+- 文件：
 
-### 4) Risks / Blockers
-- Risk 1:
-- Risk 2:
+### 4) 風險 / 阻塞
+- 風險 1：
+- 風險 2：
 
-### 5) End-of-Week Result
-- Done:
-- Not done:
-- Evidence links:
-- Next week carry-over:
+### 5) 週末結果
+- 已完成：
+- 未完成：
+- 證據連結：
+- 下週延續事項：

@@ -1,25 +1,25 @@
-# Sign-Language-Recognition-Gemma
+# 手語辨識專案（Sign-Language-Recognition-Gemma）
 
-## Raw Video Location
+## Raw 影片位置
 
-Uploaded raw sequence videos are maintained in branch `dev-agent-sync`.
+目前上傳的 raw sequence 影片主要維護在 `dev-agent-sync` 分支。
 
-If `data/videos/raw_sequences` looks empty on `main`, switch to:
-- [dev-agent-sync branch](https://github.com/Mikullee/Sign-Language-Recognition-Gemma/tree/dev-agent-sync)
+如果你在 `main` 看到 `data/videos/raw_sequences` 幾乎是空的，請切到：
+- [dev-agent-sync 分支](https://github.com/Mikullee/Sign-Language-Recognition-Gemma/tree/dev-agent-sync)
 
-## Project Focus
+## 專案重點
 
-This repository currently has two parallel tracks:
-1. Sequence data collection and annotation collaboration
-2. BiGRU baseline training/inference artifacts
+目前專案有兩條主線：
+1. sequence 資料蒐集與標註協作
+2. BiGRU baseline 訓練與推論成果
 
-Current strategy:
-- Phase 1: improve low-token gloss recognition with measurable model metrics
-- Phase 2: after Phase 1 target is met, connect `Qwen3.5-9B` for gloss-to-readable sentence generation
+目前策略：
+- Phase 1：先把低 token gloss 的辨識效果補齊，並以可量化指標驗收
+- Phase 2：Phase 1 達標後，接上 `Qwen3.5-9B` 做 gloss 到可讀句子的轉換
 
-## Start Here
+## 先看這裡
 
-Read these files in order:
+請依序閱讀：
 1. [docs/WORKFLOW_RULES.md](./docs/WORKFLOW_RULES.md)
 2. [docs/TEAM_UPLOAD_PLAYBOOK.md](./docs/TEAM_UPLOAD_PLAYBOOK.md)
 3. [docs/WEEKLY_GOALS.md](./docs/WEEKLY_GOALS.md)
@@ -28,7 +28,7 @@ Read these files in order:
 6. [docs/FILE_GUIDE.md](./docs/FILE_GUIDE.md)
 7. [baseline_gru/README.md](./baseline_gru/README.md)
 
-## Repository Structure
+## Repository 結構
 
 ```text
 docs/

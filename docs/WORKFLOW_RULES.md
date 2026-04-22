@@ -1,41 +1,41 @@
-# Workflow Rules
+# 協作流程規則
 
-## 1) Branch Policy
+## 1) 分支規則
 
-- Do not push directly to `main`.
-- Use feature branches:
-  - `data/*` for data/annotation updates
-  - `exp/*` for training/experiment updates
-  - `docs/*` for documentation updates
-  - `fix/*` for bug fixes
+- 禁止直接 push 到 `main`。
+- 請使用功能分支：
+  - `data/*`：資料與標註更新
+  - `exp/*`：訓練與實驗更新
+  - `docs/*`：文件更新
+  - `fix/*`：程式修正
 
-## 2) Pull Request Policy
+## 2) Pull Request 規則
 
-- Every change must go through a PR.
-- One PR should have one clear purpose.
-- PR title format:
+- 每次變更都要走 PR。
+- 一個 PR 只做一件主要事情。
+- PR 標題格式建議：
   - `data: ...`
   - `exp: ...`
   - `docs: ...`
   - `fix: ...`
 
-## 3) Required PR Content
+## 3) PR 必填內容
 
-- What changed
-- Why this change is needed
-- Evidence (metric, sample output, CSV/video path)
-- Risk and rollback note
+- 改了什麼
+- 為什麼要改
+- 證據（指標、輸出樣本、CSV/影片路徑）
+- 風險與回退方式
 
-## 4) Main Branch Protection (GitHub Settings)
+## 4) Main 保護設定（GitHub）
 
-Recommended settings for `main`:
-- Require a pull request before merging
-- Require at least 1 approving review
-- Dismiss stale approvals when new commits are pushed
-- Restrict who can push to matching branches
+`main` 建議至少開啟：
+- 合併前必須有 PR
+- 至少 1 位審核通過
+- 新 commit 推入後自動作廢舊審核
+- 限制可直接 push 的人員
 
-## 5) Phase Reminder
+## 5) 階段提醒
 
-- Phase 1 first: prioritize low-token gloss recognition improvement with measurable metrics.
-- Start Phase 2 only after Phase 1 target is met.
-- Phase 2 scope: only gloss-to-readable sentence generation via `Qwen3.5-9B`.
+- 先完成 Phase 1：優先補低 token gloss，並用量化指標驗收。
+- Phase 1 達標前，不啟動 Phase 2。
+- Phase 2 範圍：只做 `Qwen3.5-9B` 的 gloss 句子化整合。

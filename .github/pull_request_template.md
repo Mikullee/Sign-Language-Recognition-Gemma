@@ -1,8 +1,8 @@
-## Summary
-- What changed:
-- Why:
+## 變更摘要
+- 改了什麼：
+- 為什麼要改：
 
-## Change Type
+## 變更類型
 - [ ] `data`
 - [ ] `exp`
 - [ ] `eval`
@@ -10,22 +10,22 @@
 - [ ] `fix`
 - [ ] `chore`
 
-## Gate Impact
-- [ ] Gate A related
-- [ ] Gate B related
-- [ ] Gate C related
-- [ ] Not gate-related
+## 階段影響
+- [ ] 與 Gate A 相關
+- [ ] 與 Gate B 相關
+- [ ] 與 Gate C 相關
+- [ ] 與 Gate 無直接關聯
 
-## Evidence
-- Metrics:
-- Output sample:
-- File links (CSV/video/report):
+## 證據
+- 指標：
+- 輸出樣本：
+- 檔案連結（CSV/影片/報告）：
 
-## Risks
-- Known risks:
-- Rollback plan:
+## 風險
+- 已知風險：
+- 回退方案：
 
-## Checklist
-- [ ] I did not push directly to `main`
-- [ ] I used a structured commit message
-- [ ] I updated related docs if needed
+## 檢查清單
+- [ ] 我沒有直接 push 到 `main`
+- [ ] 我使用了結構化 commit 訊息
+- [ ] 我有同步更新相關文件（若需要）
