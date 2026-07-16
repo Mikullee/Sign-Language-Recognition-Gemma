@@ -1,0 +1,15 @@
+name: slr_runtime
+channels:
+  - conda-forge
+  - pytorch
+dependencies:
+  - python=3.10
+  - pip
+  - numpy
+  - pillow
+  - tqdm
+  - scikit-learn
+  - pip:
+      - opencv-contrib-python==4.11.0.86
+      - mediapipe==0.10.14
+      - torch

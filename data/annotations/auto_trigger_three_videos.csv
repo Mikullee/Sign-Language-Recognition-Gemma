@@ -1,0 +1,4 @@
+video_path,expected_label,start_sec,end_sec,notes
+../videos/auto_trigger/我肚子餓.mp4,我肚子餓,2.167,6.800,人工標註
+../videos/auto_trigger/你好.mp4,你好,1.333,4.430,人工標註
+../videos/auto_trigger/晚安.mp4,晚安,1.433,6.167,人工標註

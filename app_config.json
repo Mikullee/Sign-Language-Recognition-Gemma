@@ -1,0 +1,6 @@
+{
+  "source": "0",
+  "backend": "dshow",
+  "trigger_mode": "auto",
+  "save_log": true
+}
