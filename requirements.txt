@@ -1,0 +1,8 @@
+numpy
+opencv-python
+mediapipe==0.10.14
+torch
+Pillow
+paramiko
+tqdm
+scikit-learn

@@ -1,0 +1,16 @@
+name: slr_preview
+channels:
+  - conda-forge
+  - pytorch
+dependencies:
+  - python=3.10
+  - pip
+  - numpy
+  - pillow
+  - paramiko
+  - tqdm
+  - scikit-learn
+  - pip:
+      - opencv-python
+      - mediapipe==0.10.14
+      - torch

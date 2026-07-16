@@ -1,0 +1,896 @@
+from __future__ import annotations
+
+import argparse
+from collections import deque
+from dataclasses import dataclass, field
+from datetime import datetime
+from pathlib import Path
+
+import cv2
+import mediapipe as mp
+import numpy as np
+import torch
+from PIL import Image, ImageDraw, ImageFont
+
+from mediapipe.tasks.python.core.base_options import BaseOptions
+from mediapipe.tasks.python.vision.core.vision_task_running_mode import VisionTaskRunningMode
+from mediapipe.tasks.python.vision.hand_landmarker import HandLandmarker, HandLandmarkerOptions
+from mediapipe.tasks.python.vision.pose_landmarker import PoseLandmarker, PoseLandmarkerOptions
+
+from recognition.config import preview_paths
+from recognition.inference.daily30_sentence_feature_utils import build_feature_sequence
+from recognition.inference.daily30_sentence_model_utils import BiGRUSentenceClassifier
+from recognition.inference.daily30_sentence_realtime_utils import (
+    DEFAULT_CACHE_DIR,
+    DEFAULT_REMOTE_RUN_DIR,
+    ensure_artifacts_cached,
+    load_runtime_bundle,
+    save_prediction_logs,
+)
+from recognition.inference.extract_daily30_sentence_features import (
+    extract_frame_vector,
+    normalize_relative_frames,
+    resize_seq,
+)
+
+
+PATHS = preview_paths()
+ROOT = PATHS.repo_root
+RESULTS_DIR = PATHS.results_dir
+HAND_MODEL = PATHS.hand_model
+POSE_MODEL = PATHS.pose_model
+DEFAULT_CALIBRATED_MIN_CONFIDENCE = 0.50
+REJECTED_LABEL = "無明確結果"
+WAITING_LABEL = "等待開始"
+SHORT_SEGMENT_LABEL = "片段過短"
+AUTO_MODE_LABEL = "自動切段"
+MANUAL_MODE_LABEL = "手動切段"
+SEGMENT_STATE_IDLE = "IDLE_BLANK"
+SEGMENT_STATE_ACTIVE = "SIGNING_ACTIVE"
+SEGMENT_STATE_COOLDOWN = "FORCED_FINALIZE_COOLDOWN"
+
+POSE_SIZE = 33 * 3
+HAND_SIZE = 21 * 3
+LEFT_SHOULDER = 11
+RIGHT_SHOULDER = 12
+LEFT_HIP = 23
+RIGHT_HIP = 24
+LEFT_WRIST = 15
+RIGHT_WRIST = 16
+LEFT_ELBOW = 13
+RIGHT_ELBOW = 14
+
+FONT_CANDIDATES = [
+    Path(r"C:\Windows\Fonts\msjh.ttc"),
+    Path(r"C:\Windows\Fonts\msyh.ttc"),
+    Path(r"C:\Windows\Fonts\mingliu.ttc"),
+]
+
+
+@dataclass
+class AutoTriggerConfig:
+    start_streak_frames: int
+    blank_streak_frames: int
+    start_motion_threshold: float
+    blank_motion_threshold: float
+    max_segment_frames: int
+    min_segment_frames: int
+    segment_cooldown_frames: int
+    torso_motion_weight: float = 0.35
+    hidden_rest_enabled: bool = True
+    side_margin_ratio: float = 0.18
+    chest_drop_ratio: float = 0.28
+    preroll_frames: int = 6
+    pose_visibility_threshold: float = 0.35
+
+
+@dataclass
+class AutoFrameAnalysis:
+    is_blank: bool
+    visible_rest_blank: bool
+    hidden_rest_blank: bool
+    torso_motion_score: float
+    hand_motion_score: float
+    effective_motion_score: float
+    hands_at_sides: bool
+    wrists_detected: bool
+    torso_valid: bool
+    explicit_hands_detected: int
+    wrist_source_left: str
+    wrist_source_right: str
+
+
+@dataclass
+class AutoTriggerRuntime:
+    segment_state: str = SEGMENT_STATE_IDLE
+    active_streak: int = 0
+    blank_streak: int = 0
+    cooldown_left: int = 0
+    segment_frames: list[np.ndarray] = field(default_factory=list)
+    pre_roll_frames: deque[np.ndarray] = field(default_factory=lambda: deque(maxlen=6))
+    finalize_reason: str = ""
+
+
+def load_font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+    for path in FONT_CANDIDATES:
+        if path.exists():
+            try:
+                return ImageFont.truetype(str(path), size=size)
+            except Exception:
+                continue
+    return ImageFont.load_default()
+
+
+FONT_BODY = load_font(13)
+FONT_HINT = load_font(11)
+FONT_RESULT = load_font(24)
+
+
+def draw_text(img: np.ndarray, text: str, xy: tuple[int, int], font, color: tuple[int, int, int]) -> np.ndarray:
+    pil = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+    draw = ImageDraw.Draw(pil)
+    draw.text(xy, text, font=font, fill=color)
+    return cv2.cvtColor(np.array(pil), cv2.COLOR_RGB2BGR)
+
+
+def calibrate_confidence(raw_confidence: float) -> float:
+    raw = float(np.clip(raw_confidence, 0.0, 1.0))
+    normalized = np.clip((raw - 0.05) / 0.40, 0.0, 1.0)
+    eased = normalized ** 0.70
+    calibrated = 0.15 + 0.80 * eased
+    return float(np.clip(calibrated, 0.0, 0.95))
+
+
+def format_confidence_percent(confidence: float) -> str:
+    return f"{round(float(confidence) * 100):.0f}%"
+
+
+def decide_prediction_output(localized_label: str, raw_confidence: float, calibrated_threshold: float) -> tuple[str, float, float]:
+    calibrated_confidence = calibrate_confidence(raw_confidence)
+    if calibrated_confidence >= calibrated_threshold:
+        return localized_label, raw_confidence, calibrated_confidence
+    return REJECTED_LABEL, raw_confidence, calibrated_confidence
+
+
+def localize_label(label: str, label_display: dict[str, str]) -> str:
+    return str(label_display.get(label, label))
+
+
+def localize_top3(top3_candidates: list[tuple[str, float]], label_display: dict[str, str]) -> list[tuple[str, float]]:
+    return [(localize_label(label, label_display), score) for label, score in top3_candidates]
+
+
+def draw_landmark_points(frame: np.ndarray, hand_result, pose_result) -> np.ndarray:
+    canvas = frame.copy()
+    h, w = canvas.shape[:2]
+    pose_landmarks = getattr(pose_result, "pose_landmarks", []) if pose_result is not None else []
+    if pose_landmarks:
+        for lm in pose_landmarks[0]:
+            x = int(lm.x * w)
+            y = int(lm.y * h)
+            if 0 <= x < w and 0 <= y < h:
+                cv2.circle(canvas, (x, y), 3, (0, 255, 255), -1)
+    handedness_list = getattr(hand_result, "handedness", []) if hand_result is not None else []
+    hand_landmarks_list = getattr(hand_result, "hand_landmarks", []) if hand_result is not None else []
+    for handedness, landmarks in zip(handedness_list, hand_landmarks_list):
+        color = (0, 255, 0) if handedness[0].category_name.lower() == "left" else (255, 0, 0)
+        points = []
+        for lm in landmarks:
+            x = int(lm.x * w)
+            y = int(lm.y * h)
+            points.append((x, y))
+            if 0 <= x < w and 0 <= y < h:
+                cv2.circle(canvas, (x, y), 4, color, -1)
+        for a, b in [
+            (0, 1), (1, 2), (2, 3), (3, 4), (0, 5), (5, 6), (6, 7), (7, 8),
+            (5, 9), (9, 10), (10, 11), (11, 12), (9, 13), (13, 14), (14, 15), (15, 16),
+            (13, 17), (17, 18), (18, 19), (19, 20), (0, 17),
+        ]:
+            if a < len(points) and b < len(points):
+                cv2.line(canvas, points[a], points[b], color, 2)
+    return canvas
+
+
+def localize_segment_state(segment_state: str, trigger_mode: str) -> str:
+    if trigger_mode == "manual":
+        return "錄製中" if segment_state == SEGMENT_STATE_ACTIVE else "等待開始"
+    if segment_state == SEGMENT_STATE_ACTIVE:
+        return "錄製中"
+    if segment_state == SEGMENT_STATE_COOLDOWN:
+        return "自動收尾"
+    return "等待開始"
+
+
+def draw_overlay(
+    frame: np.ndarray,
+    display_label: str,
+    top3_candidates: list[tuple[str, float]],
+    emitted_labels: list[str],
+    fps_value: float,
+    mode_label: str,
+    segment_status: str,
+) -> np.ndarray:
+    canvas = frame.copy()
+    h, w = canvas.shape[:2]
+    cv2.rectangle(canvas, (12, 12), (760, 152), (0, 0, 0), -1)
+    cv2.rectangle(canvas, (12, h - 56), (min(w - 12, 1060), h - 12), (0, 0, 0), -1)
+    canvas = draw_text(canvas, f"模式：{mode_label}", (26, 18), FONT_HINT, (170, 210, 255))
+    canvas = draw_text(canvas, f"片段狀態：{segment_status}", (190, 18), FONT_HINT, (255, 220, 120))
+    canvas = draw_text(canvas, f"目前辨識：{display_label}", (26, 40), FONT_RESULT, (0, 255, 0))
+    if top3_candidates:
+        candidate_text = "候選結果：" + " | ".join(
+            f"{label} {format_confidence_percent(calibrate_confidence(score))}" for label, score in top3_candidates
+        )
+    else:
+        candidate_text = "候選結果：-"
+    canvas = draw_text(canvas, candidate_text, (26, 92), FONT_BODY, (255, 220, 120))
+    canvas = draw_text(canvas, f"FPS：{fps_value:.1f}", (26, 120), FONT_HINT, (220, 220, 220))
+    canvas = draw_text(canvas, "操作：Q 離開、R 重設、S 存檔、Space 手動開始/結束", (150, 120), FONT_HINT, (180, 180, 180))
+    history_text = "已辨識句子：" + (" | ".join(emitted_labels[-6:]) if emitted_labels else "-")
+    canvas = draw_text(canvas, history_text, (24, h - 42), FONT_BODY, (255, 255, 255))
+    return canvas
+
+
+def prepare_detection_frame(frame: np.ndarray, max_width: int) -> np.ndarray:
+    if max_width <= 0:
+        return frame
+    height, width = frame.shape[:2]
+    if width <= max_width:
+        return frame
+    scale = max_width / float(width)
+    target_size = (max(1, int(round(width * scale))), max(1, int(round(height * scale))))
+    return cv2.resize(frame, target_size, interpolation=cv2.INTER_AREA)
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Realtime sentence inference for daily30 BiGRU model.")
+    parser.add_argument("--source", default="1", help="Camera index like 0/1/2 or a video path.")
+    parser.add_argument("--backend", choices=["auto", "dshow"], default="dshow")
+    parser.add_argument("--model-cache-dir", default=str(DEFAULT_CACHE_DIR))
+    parser.add_argument("--remote-run-dir", default=DEFAULT_REMOTE_RUN_DIR)
+    parser.add_argument("--save-log", action="store_true")
+    parser.add_argument("--min-conf-override", type=float, default=-1.0, help="Override calibrated confidence threshold in 0-1 space.")
+    parser.add_argument("--trigger-mode", choices=["auto", "manual"], default="auto")
+    parser.add_argument("--start-streak-frames", type=int, default=4)
+    parser.add_argument("--blank-streak-frames", type=int, default=6)
+    parser.add_argument("--start-motion-threshold", type=float, default=0.040)
+    parser.add_argument("--blank-motion-threshold", type=float, default=0.018)
+    parser.add_argument("--max-segment-frames", type=int, default=144)
+    parser.add_argument("--min-segment-frames", type=int, default=24)
+    parser.add_argument("--segment-cooldown-frames", type=int, default=10)
+    parser.add_argument("--torso-motion-weight", type=float, default=0.35)
+    parser.add_argument("--hidden-rest-enabled", dest="hidden_rest_enabled", action="store_true")
+    parser.add_argument("--no-hidden-rest-enabled", dest="hidden_rest_enabled", action="store_false")
+    parser.set_defaults(hidden_rest_enabled=True)
+    parser.add_argument("--detector-frame-skip", type=int, default=2)
+    parser.add_argument("--inference-max-width", type=int, default=960)
+    parser.add_argument("--width", type=int, default=1280)
+    parser.add_argument("--height", type=int, default=900)
+    parser.add_argument("--max-frames", type=int, default=0, help="Stop automatically after N frames. 0 disables auto-stop.")
+    return parser.parse_args(argv)
+
+
+def open_capture(source: str, backend: str) -> cv2.VideoCapture:
+    if source.isdigit():
+        index = int(source)
+        if backend == "dshow":
+            return cv2.VideoCapture(index, cv2.CAP_DSHOW)
+        return cv2.VideoCapture(index)
+    return cv2.VideoCapture(source)
+
+
+def is_file_source(source: str) -> bool:
+    return not source.isdigit()
+
+
+def seek_video_capture(cap: cv2.VideoCapture, seconds_delta: float) -> bool:
+    fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
+    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    if fps <= 0 or frame_count <= 0:
+        return False
+    current_frame = int(cap.get(cv2.CAP_PROP_POS_FRAMES) or 0)
+    target_frame = current_frame + int(round(seconds_delta * fps))
+    target_frame = max(0, min(frame_count - 1, target_frame))
+    return bool(cap.set(cv2.CAP_PROP_POS_FRAMES, target_frame))
+
+
+def build_sequence_feature(raw_frame_buffer: deque[np.ndarray], append_delta: bool, zscore_features: bool) -> np.ndarray:
+    raw_frames = np.stack(list(raw_frame_buffer), axis=0)
+    rel_frames = normalize_relative_frames(raw_frames)
+    return build_feature_sequence(rel_frames, append_delta=append_delta, zscore_features=zscore_features)
+
+
+def build_sequence_feature_from_list(frame_vectors: list[np.ndarray], sequence_length: int, append_delta: bool, zscore_features: bool) -> np.ndarray | None:
+    if not frame_vectors:
+        return None
+    raw_frames = np.stack(frame_vectors, axis=0)
+    rel_frames = normalize_relative_frames(raw_frames)
+    resized = resize_seq(rel_frames, sequence_length)
+    return build_feature_sequence(resized, append_delta=append_delta, zscore_features=zscore_features)
+
+
+def decode_top3_candidates(probs: np.ndarray, labels: list[str]) -> list[tuple[str, float]]:
+    if probs.size == 0:
+        return []
+    topk = min(3, int(probs.shape[0]))
+    indices = np.argsort(probs)[-3:][::-1]
+    return [(str(labels[int(idx)]), float(probs[int(idx)])) for idx in indices[:topk]]
+
+
+def select_torch_device(preferred_device: str | None = None) -> torch.device:
+    preferred = (preferred_device or "auto").strip().lower()
+    if preferred == "cuda":
+        if torch.cuda.is_available():
+            return torch.device("cuda")
+        return torch.device("cpu")
+    if preferred == "cpu":
+        return torch.device("cpu")
+    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+def build_auto_trigger_config(args: argparse.Namespace) -> AutoTriggerConfig:
+    preroll_frames = max(2, min(int(args.start_streak_frames) * 2, 12))
+    return AutoTriggerConfig(
+        start_streak_frames=int(args.start_streak_frames),
+        blank_streak_frames=int(args.blank_streak_frames),
+        start_motion_threshold=float(args.start_motion_threshold),
+        blank_motion_threshold=float(args.blank_motion_threshold),
+        max_segment_frames=int(args.max_segment_frames),
+        min_segment_frames=int(args.min_segment_frames),
+        segment_cooldown_frames=int(args.segment_cooldown_frames),
+        torso_motion_weight=float(args.torso_motion_weight),
+        hidden_rest_enabled=bool(args.hidden_rest_enabled),
+        preroll_frames=preroll_frames,
+    )
+
+
+def build_initial_auto_state(config: AutoTriggerConfig) -> AutoTriggerRuntime:
+    return AutoTriggerRuntime(pre_roll_frames=deque(maxlen=config.preroll_frames))
+
+
+def reset_runtime_state(emitted_labels: list[str]) -> None:
+    emitted_labels.clear()
+
+
+def extract_point_from_pose(pose_result, index: int, visibility_threshold: float = 0.0) -> np.ndarray | None:
+    pose_landmarks = getattr(pose_result, "pose_landmarks", []) if pose_result is not None else []
+    if not pose_landmarks:
+        return None
+    landmarks = pose_landmarks[0]
+    if index >= len(landmarks):
+        return None
+    lm = landmarks[index]
+    visibility = float(getattr(lm, "visibility", 1.0))
+    presence = float(getattr(lm, "presence", 1.0))
+    if visibility < visibility_threshold or presence < visibility_threshold:
+        return None
+    point = np.array([lm.x, lm.y, lm.z], dtype=np.float32)
+    if np.allclose(point, 0.0):
+        return None
+    return point
+
+
+def extract_wrist_points(hand_result, pose_result, pose_visibility_threshold: float) -> tuple[np.ndarray | None, np.ndarray | None, int, str, str]:
+    left_wrist = None
+    right_wrist = None
+    explicit_hands_detected = 0
+    left_source = "none"
+    right_source = "none"
+    handedness_list = getattr(hand_result, "handedness", []) if hand_result is not None else []
+    hand_landmarks_list = getattr(hand_result, "hand_landmarks", []) if hand_result is not None else []
+    for handedness, landmarks in zip(handedness_list, hand_landmarks_list):
+        if not landmarks:
+            continue
+        explicit_hands_detected += 1
+        wrist_lm = landmarks[0]
+        wrist_point = np.array([wrist_lm.x, wrist_lm.y, wrist_lm.z], dtype=np.float32)
+        if handedness[0].category_name.lower() == "left":
+            left_wrist = wrist_point
+            left_source = "hand"
+        else:
+            right_wrist = wrist_point
+            right_source = "hand"
+    if left_wrist is None:
+        left_wrist = extract_point_from_pose(pose_result, LEFT_WRIST, visibility_threshold=pose_visibility_threshold)
+        if left_wrist is not None:
+            left_source = "pose"
+    if right_wrist is None:
+        right_wrist = extract_point_from_pose(pose_result, RIGHT_WRIST, visibility_threshold=pose_visibility_threshold)
+        if right_wrist is not None:
+            right_source = "pose"
+    return left_wrist, right_wrist, explicit_hands_detected, left_source, right_source
+
+
+def _masked_motion(previous_points: np.ndarray | None, current_points: np.ndarray | None) -> float:
+    if previous_points is None or current_points is None:
+        return 0.0
+    valid_mask = np.any(previous_points != 0, axis=1) & np.any(current_points != 0, axis=1)
+    if not np.any(valid_mask):
+        return 0.0
+    diff = current_points[valid_mask] - previous_points[valid_mask]
+    return float(np.sqrt(np.mean(np.square(diff), dtype=np.float32)))
+
+
+def decompose_frame_vector(frame_vector: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    pose = frame_vector[:POSE_SIZE].reshape(33, 3).astype(np.float32)
+    left = frame_vector[POSE_SIZE:POSE_SIZE + HAND_SIZE].reshape(21, 3).astype(np.float32)
+    right = frame_vector[POSE_SIZE + HAND_SIZE:].reshape(21, 3).astype(np.float32)
+    return pose, left, right
+
+
+def compute_motion_scores(previous_frame_vector: np.ndarray | None, current_frame_vector: np.ndarray, explicit_hands_detected: int, torso_motion_weight: float) -> tuple[float, float, float]:
+    if previous_frame_vector is None:
+        return 0.0, 0.0, 0.0
+    prev_pose, prev_left, prev_right = decompose_frame_vector(previous_frame_vector)
+    curr_pose, curr_left, curr_right = decompose_frame_vector(current_frame_vector)
+    torso_idx = [LEFT_SHOULDER, RIGHT_SHOULDER, LEFT_ELBOW, RIGHT_ELBOW, LEFT_HIP, RIGHT_HIP]
+    torso_motion = _masked_motion(prev_pose[torso_idx], curr_pose[torso_idx])
+    if explicit_hands_detected > 0:
+        left_motion = _masked_motion(prev_left, curr_left)
+        right_motion = _masked_motion(prev_right, curr_right)
+        hand_motion = max(left_motion, right_motion)
+        effective_motion = max(hand_motion, torso_motion_weight * torso_motion)
+    else:
+        hand_motion = 0.0
+        effective_motion = torso_motion
+    return torso_motion, hand_motion, effective_motion
+
+
+def analyze_auto_frame(hand_result, pose_result, previous_frame_vector: np.ndarray | None, current_frame_vector: np.ndarray, config: AutoTriggerConfig) -> AutoFrameAnalysis:
+    left_shoulder = extract_point_from_pose(pose_result, LEFT_SHOULDER, visibility_threshold=config.pose_visibility_threshold)
+    right_shoulder = extract_point_from_pose(pose_result, RIGHT_SHOULDER, visibility_threshold=config.pose_visibility_threshold)
+    left_hip = extract_point_from_pose(pose_result, LEFT_HIP, visibility_threshold=config.pose_visibility_threshold)
+    right_hip = extract_point_from_pose(pose_result, RIGHT_HIP, visibility_threshold=config.pose_visibility_threshold)
+    left_wrist, right_wrist, explicit_hands_detected, left_source, right_source = extract_wrist_points(
+        hand_result,
+        pose_result,
+        pose_visibility_threshold=config.pose_visibility_threshold,
+    )
+    torso_valid = all(point is not None for point in [left_shoulder, right_shoulder, left_hip, right_hip])
+    wrists_detected = left_wrist is not None and right_wrist is not None
+    torso_motion_score, hand_motion_score, effective_motion_score = compute_motion_scores(
+        previous_frame_vector,
+        current_frame_vector,
+        explicit_hands_detected,
+        config.torso_motion_weight,
+    )
+
+    hands_at_sides = False
+    visible_rest_blank = False
+    hidden_rest_blank = False
+
+    if torso_valid and wrists_detected:
+        assert left_shoulder is not None and right_shoulder is not None
+        assert left_hip is not None and right_hip is not None
+        assert left_wrist is not None and right_wrist is not None
+        torso_center_x = float((left_shoulder[0] + right_shoulder[0]) / 2.0)
+        shoulder_width = max(float(np.linalg.norm(left_shoulder[:2] - right_shoulder[:2])), 1e-3)
+        torso_height = max(float(((left_hip[1] + right_hip[1]) / 2.0) - ((left_shoulder[1] + right_shoulder[1]) / 2.0)), 1e-3)
+        chest_y = float((left_shoulder[1] + right_shoulder[1]) / 2.0 + config.chest_drop_ratio * torso_height)
+        side_margin = config.side_margin_ratio * shoulder_width
+        left_at_side = left_wrist[1] >= chest_y and left_wrist[0] <= torso_center_x - side_margin
+        right_at_side = right_wrist[1] >= chest_y and right_wrist[0] >= torso_center_x + side_margin
+        hands_at_sides = bool(left_at_side and right_at_side)
+        visible_rest_blank = hands_at_sides and effective_motion_score <= config.blank_motion_threshold
+
+    if (
+        config.hidden_rest_enabled
+        and torso_valid
+        and explicit_hands_detected == 0
+        and torso_motion_score <= config.blank_motion_threshold
+    ):
+        hidden_rest_blank = True
+
+    return AutoFrameAnalysis(
+        is_blank=bool(visible_rest_blank or hidden_rest_blank),
+        visible_rest_blank=visible_rest_blank,
+        hidden_rest_blank=hidden_rest_blank,
+        torso_motion_score=torso_motion_score,
+        hand_motion_score=hand_motion_score,
+        effective_motion_score=effective_motion_score,
+        hands_at_sides=hands_at_sides,
+        wrists_detected=wrists_detected,
+        torso_valid=torso_valid,
+        explicit_hands_detected=explicit_hands_detected,
+        wrist_source_left=left_source,
+        wrist_source_right=right_source,
+    )
+
+
+def update_auto_trigger_state(state: AutoTriggerRuntime, current_frame_vector: np.ndarray, analysis: AutoFrameAnalysis, config: AutoTriggerConfig) -> str | None:
+    state.pre_roll_frames.append(current_frame_vector.copy())
+
+    if state.segment_state == SEGMENT_STATE_COOLDOWN:
+        state.cooldown_left = max(0, state.cooldown_left - 1)
+        if state.cooldown_left == 0:
+            state.segment_state = SEGMENT_STATE_IDLE
+            state.finalize_reason = ""
+        else:
+            return None
+
+    if state.segment_state == SEGMENT_STATE_IDLE:
+        if not analysis.is_blank and analysis.effective_motion_score >= config.start_motion_threshold and not (
+            analysis.explicit_hands_detected == 0 and analysis.torso_motion_score < config.start_motion_threshold
+        ):
+            state.active_streak += 1
+        else:
+            state.active_streak = 0
+
+        if state.active_streak >= config.start_streak_frames:
+            state.segment_state = SEGMENT_STATE_ACTIVE
+            state.segment_frames = [frame.copy() for frame in state.pre_roll_frames]
+            state.blank_streak = 0
+            state.active_streak = 0
+        return None
+
+    state.segment_frames.append(current_frame_vector.copy())
+    if analysis.is_blank:
+        state.blank_streak += 1
+    else:
+        state.blank_streak = 0
+
+    if len(state.segment_frames) >= config.max_segment_frames:
+        state.finalize_reason = "timeout_finalize"
+        return state.finalize_reason
+    if state.blank_streak >= config.blank_streak_frames:
+        state.finalize_reason = "hidden_rest_finalize" if analysis.hidden_rest_blank else "visible_rest_finalize"
+        return state.finalize_reason
+    return None
+
+
+def finalize_auto_trigger_state(state: AutoTriggerRuntime, config: AutoTriggerConfig) -> tuple[list[np.ndarray], str]:
+    segment_frames = state.segment_frames
+    reason = state.finalize_reason or "manual_finalize"
+    if reason in {"visible_rest_finalize", "hidden_rest_finalize"} and len(segment_frames) > state.blank_streak:
+        segment_frames = segment_frames[:-state.blank_streak]
+
+    finalized_frames = [frame.copy() for frame in segment_frames]
+    state.segment_state = SEGMENT_STATE_COOLDOWN
+    state.cooldown_left = config.segment_cooldown_frames
+    state.blank_streak = 0
+    state.active_streak = 0
+    state.segment_frames = []
+    state.finalize_reason = ""
+    state.pre_roll_frames.clear()
+    return finalized_frames, reason
+
+
+def infer_segment_prediction(frame_vectors: list[np.ndarray], sequence_length: int, append_delta: bool, zscore_features: bool, model: BiGRUSentenceClassifier, device: torch.device, labels: list[str], label_display: dict[str, str], calibrated_min_confidence: float) -> tuple[str, float, float, list[tuple[str, float]]]:
+    seq_array = build_sequence_feature_from_list(frame_vectors, sequence_length, append_delta, zscore_features)
+    if seq_array is None:
+        return SHORT_SEGMENT_LABEL, 0.0, 0.0, []
+
+    seq = torch.tensor(seq_array, dtype=torch.float32, device=device).unsqueeze(0)
+    with torch.no_grad():
+        probs = torch.softmax(model(seq), dim=1)[0].cpu().numpy()
+    top3_candidates = localize_top3(decode_top3_candidates(probs, labels), label_display)
+    pred_idx = int(np.argmax(probs))
+    localized_label = localize_label(str(labels[pred_idx]), label_display)
+    display_label, raw_confidence, calibrated_confidence = decide_prediction_output(localized_label, float(probs[pred_idx]), calibrated_min_confidence)
+    return display_label, raw_confidence, calibrated_confidence, top3_candidates
+
+
+def main() -> None:
+    args = parse_args()
+    cache_dir = ensure_artifacts_cached(Path(args.model_cache_dir), args.remote_run_dir)
+    bundle = load_runtime_bundle(cache_dir)
+    device = select_torch_device(bundle.get("device"))
+    calibrated_min_confidence = DEFAULT_CALIBRATED_MIN_CONFIDENCE
+    if args.min_conf_override > 0:
+        calibrated_min_confidence = float(args.min_conf_override)
+
+    input_dim = int(
+        build_sequence_feature(
+            deque([np.zeros(225, dtype=np.float32) for _ in range(int(bundle["sequence_length"]))], maxlen=int(bundle["sequence_length"])),
+            bundle["append_delta"],
+            bundle["zscore_features"],
+        ).shape[-1]
+    )
+    model = BiGRUSentenceClassifier(
+        input_dim=input_dim,
+        hidden_size=int(bundle["hidden_size"]),
+        num_layers=int(bundle["num_layers"]),
+        dropout=float(bundle["dropout"]),
+        num_classes=len(bundle["labels"]),
+        pooling=str(bundle["pooling"]),
+    )
+    model.load_state_dict(torch.load(bundle["paths"]["best_model"], map_location=device))
+    model.to(device)
+    model.eval()
+
+    cap = open_capture(str(args.source), args.backend)
+    file_source_mode = is_file_source(str(args.source))
+    if not cap.isOpened():
+        raise RuntimeError(f"Unable to open video source: {args.source}")
+
+    window_name = "Realtime Sentence Recognition"
+    cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+    cv2.resizeWindow(window_name, args.width, args.height)
+
+    hand_options = HandLandmarkerOptions(
+        base_options=BaseOptions(model_asset_path=str(HAND_MODEL)),
+        running_mode=VisionTaskRunningMode.IMAGE,
+        num_hands=2,
+    )
+    pose_options = PoseLandmarkerOptions(
+        base_options=BaseOptions(model_asset_path=str(POSE_MODEL)),
+        running_mode=VisionTaskRunningMode.IMAGE,
+    )
+
+    auto_config = build_auto_trigger_config(args)
+    auto_state = build_initial_auto_state(auto_config)
+    emitted_labels: list[str] = []
+    prediction_log: list[dict] = []
+    last_hand_result = None
+    last_pose_result = None
+    previous_frame_vector: np.ndarray | None = None
+    frame_index = 0
+    last_tick = cv2.getTickCount()
+    fps_value = 0.0
+    top3_candidates: list[tuple[str, float]] = []
+    manual_active = False
+    manual_frame_vectors: list[np.ndarray] = []
+    reset_events = 0
+    saved_events = 0
+    display_label = WAITING_LABEL
+    display_raw_confidence = 0.0
+    display_calibrated_confidence = 0.0
+    last_finalize_reason = ""
+    latest_analysis = AutoFrameAnalysis(
+        is_blank=True,
+        visible_rest_blank=False,
+        hidden_rest_blank=False,
+        torso_motion_score=0.0,
+        hand_motion_score=0.0,
+        effective_motion_score=0.0,
+        hands_at_sides=False,
+        wrists_detected=False,
+        torso_valid=False,
+        explicit_hands_detected=0,
+        wrist_source_left="none",
+        wrist_source_right="none",
+    )
+
+    with HandLandmarker.create_from_options(hand_options) as hand_landmarker, PoseLandmarker.create_from_options(pose_options) as pose_landmarker:
+        while True:
+            ok, frame = cap.read()
+            if not ok:
+                if file_source_mode:
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                    ok, frame = cap.read()
+                    if not ok:
+                        break
+                else:
+                    break
+
+            should_run_detector = (
+                frame_index % max(1, int(bundle["frame_step"])) == 0
+                and frame_index % max(1, int(args.detector_frame_skip)) == 0
+            )
+            if should_run_detector:
+                detection_frame = prepare_detection_frame(frame, int(args.inference_max_width))
+                rgb = cv2.cvtColor(detection_frame, cv2.COLOR_BGR2RGB)
+                mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+                hand_result = hand_landmarker.detect(mp_image)
+                pose_result = pose_landmarker.detect(mp_image)
+                last_hand_result = hand_result
+                last_pose_result = pose_result
+                current_frame_vector = extract_frame_vector(hand_result, pose_result)
+
+                if args.trigger_mode == "manual":
+                    if manual_active:
+                        manual_frame_vectors.append(current_frame_vector)
+                    torso_motion_score, hand_motion_score, effective_motion_score = compute_motion_scores(
+                        previous_frame_vector,
+                        current_frame_vector,
+                        explicit_hands_detected=0,
+                        torso_motion_weight=auto_config.torso_motion_weight,
+                    )
+                    latest_analysis = AutoFrameAnalysis(
+                        is_blank=False,
+                        visible_rest_blank=False,
+                        hidden_rest_blank=False,
+                        torso_motion_score=torso_motion_score,
+                        hand_motion_score=hand_motion_score,
+                        effective_motion_score=effective_motion_score,
+                        hands_at_sides=False,
+                        wrists_detected=False,
+                        torso_valid=False,
+                        explicit_hands_detected=0,
+                        wrist_source_left="none",
+                        wrist_source_right="none",
+                    )
+                    if not manual_active and display_label == WAITING_LABEL:
+                        top3_candidates = []
+                    auto_state.segment_state = SEGMENT_STATE_ACTIVE if manual_active else SEGMENT_STATE_IDLE
+                else:
+                    latest_analysis = analyze_auto_frame(hand_result, pose_result, previous_frame_vector, current_frame_vector, auto_config)
+                    finalize_reason = update_auto_trigger_state(auto_state, current_frame_vector, latest_analysis, auto_config)
+                    if finalize_reason is not None:
+                        segment_frames, last_finalize_reason = finalize_auto_trigger_state(auto_state, auto_config)
+                        if len(segment_frames) < auto_config.min_segment_frames:
+                            display_label = SHORT_SEGMENT_LABEL
+                            display_raw_confidence = 0.0
+                            display_calibrated_confidence = 0.0
+                            top3_candidates = []
+                        else:
+                            display_label, display_raw_confidence, display_calibrated_confidence, top3_candidates = infer_segment_prediction(
+                                segment_frames,
+                                int(bundle["sequence_length"]),
+                                bool(bundle["append_delta"]),
+                                bool(bundle["zscore_features"]),
+                                model,
+                                device,
+                                bundle["labels"],
+                                bundle["label_display"],
+                                calibrated_min_confidence,
+                            )
+                            if display_label not in {REJECTED_LABEL, SHORT_SEGMENT_LABEL}:
+                                emitted_labels.append(display_label)
+                    elif auto_state.segment_state == SEGMENT_STATE_IDLE and latest_analysis.is_blank and not emitted_labels:
+                        display_label = WAITING_LABEL
+
+                previous_frame_vector = current_frame_vector
+
+            prediction_log.append(
+                {
+                    "timestamp": datetime.now().isoformat(timespec="seconds"),
+                    "frame_index": frame_index,
+                    "trigger_mode": args.trigger_mode,
+                    "manual_active": manual_active,
+                    "predicted_label": display_label,
+                    "display_label": display_label,
+                    "raw_confidence": round(float(display_raw_confidence), 4),
+                    "calibrated_confidence": round(float(display_calibrated_confidence), 4),
+                    "display_confidence": round(float(display_calibrated_confidence), 4),
+                    "decision_threshold_source": "calibrated_confidence",
+                    "top3_candidates": [{"label": label, "confidence": round(score, 4)} for label, score in top3_candidates],
+                    "segment_state": auto_state.segment_state if args.trigger_mode == "auto" else ("SIGNING_ACTIVE" if manual_active else "IDLE_BLANK"),
+                    "segment_status": localize_segment_state(
+                        auto_state.segment_state if args.trigger_mode == "auto" else (SEGMENT_STATE_ACTIVE if manual_active else SEGMENT_STATE_IDLE),
+                        args.trigger_mode,
+                    ),
+                    "segment_frame_count": len(auto_state.segment_frames) if args.trigger_mode == "auto" else len(manual_frame_vectors),
+                    "segment_finalize_reason": last_finalize_reason,
+                    "is_blank": latest_analysis.is_blank,
+                    "visible_rest_blank": latest_analysis.visible_rest_blank,
+                    "hidden_rest_blank": latest_analysis.hidden_rest_blank,
+                    "torso_motion_score": round(float(latest_analysis.torso_motion_score), 6),
+                    "hand_motion_score": round(float(latest_analysis.hand_motion_score), 6),
+                    "effective_motion_score": round(float(latest_analysis.effective_motion_score), 6),
+                    "hands_at_sides": latest_analysis.hands_at_sides,
+                    "wrists_detected": latest_analysis.wrists_detected,
+                    "torso_valid": latest_analysis.torso_valid,
+                    "explicit_hands_detected": latest_analysis.explicit_hands_detected,
+                    "wrist_source_left": latest_analysis.wrist_source_left,
+                    "wrist_source_right": latest_analysis.wrist_source_right,
+                    "emitted_count": len(emitted_labels),
+                }
+            )
+
+            now_tick = cv2.getTickCount()
+            elapsed = (now_tick - last_tick) / cv2.getTickFrequency()
+            if elapsed > 0:
+                fps_value = 1.0 / elapsed
+            last_tick = now_tick
+
+            landmark_view = draw_landmark_points(frame, last_hand_result, last_pose_result)
+            overlay = draw_overlay(
+                landmark_view,
+                display_label,
+                top3_candidates,
+                emitted_labels,
+                fps_value,
+                AUTO_MODE_LABEL if args.trigger_mode == "auto" else MANUAL_MODE_LABEL,
+                localize_segment_state(
+                    auto_state.segment_state if args.trigger_mode == "auto" else (SEGMENT_STATE_ACTIVE if manual_active else SEGMENT_STATE_IDLE),
+                    args.trigger_mode,
+                ),
+            )
+            cv2.imshow(window_name, overlay)
+            key = cv2.waitKeyEx(1)
+            if key in {27, ord("q"), ord("Q")}:
+                break
+            if key in {ord("r"), ord("R")}:
+                reset_runtime_state(emitted_labels)
+                auto_state = build_initial_auto_state(auto_config)
+                manual_active = False
+                manual_frame_vectors = []
+                previous_frame_vector = None
+                top3_candidates = []
+                display_label = WAITING_LABEL
+                display_raw_confidence = 0.0
+                display_calibrated_confidence = 0.0
+                last_finalize_reason = ""
+                reset_events += 1
+            if file_source_mode and key in {2490368, 2621440}:
+                seek_seconds = 5.0 if key == 2490368 else -5.0
+                if seek_video_capture(cap, seek_seconds):
+                    auto_state = build_initial_auto_state(auto_config)
+                    manual_active = False
+                    manual_frame_vectors = []
+                    previous_frame_vector = None
+                    top3_candidates = []
+                    display_label = WAITING_LABEL
+                    display_raw_confidence = 0.0
+                    display_calibrated_confidence = 0.0
+                    last_finalize_reason = ""
+                continue
+            if key == ord(" "):
+                if args.trigger_mode == "manual":
+                    if not manual_active:
+                        manual_active = True
+                        manual_frame_vectors = []
+                        display_label = WAITING_LABEL
+                        top3_candidates = []
+                    else:
+                        manual_active = False
+                        if len(manual_frame_vectors) < auto_config.min_segment_frames:
+                            display_label = SHORT_SEGMENT_LABEL
+                            display_raw_confidence = 0.0
+                            display_calibrated_confidence = 0.0
+                            top3_candidates = []
+                        else:
+                            display_label, display_raw_confidence, display_calibrated_confidence, top3_candidates = infer_segment_prediction(
+                                manual_frame_vectors,
+                                int(bundle["sequence_length"]),
+                                bool(bundle["append_delta"]),
+                                bool(bundle["zscore_features"]),
+                                model,
+                                device,
+                                bundle["labels"],
+                                bundle["label_display"],
+                                calibrated_min_confidence,
+                            )
+                            if display_label not in {REJECTED_LABEL, SHORT_SEGMENT_LABEL}:
+                                emitted_labels.append(display_label)
+                        last_finalize_reason = "manual_space"
+                        manual_frame_vectors = []
+            if key in {ord("s"), ord("S")}:
+                stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                session_payload = {
+                    "timestamp": stamp,
+                    "input_source": str(args.source),
+                    "model_run_name": bundle["run_name"],
+                    "remote_run_dir": str(args.remote_run_dir),
+                    "cache_dir": str(cache_dir),
+                    "device": str(device),
+                    "trigger_mode": args.trigger_mode,
+                    "emitted_labels": emitted_labels,
+                    "reset_events": reset_events,
+                    "saved_events": saved_events + 1,
+                    "calibrated_min_confidence": calibrated_min_confidence,
+                    "decision_threshold_source": "calibrated_confidence",
+                }
+                save_prediction_logs(RESULTS_DIR, prediction_log, session_payload, stamp=stamp)
+                saved_events += 1
+            frame_index += 1
+            if args.max_frames > 0 and frame_index >= args.max_frames:
+                break
+
+    cap.release()
+    cv2.destroyAllWindows()
+
+    if args.save_log:
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        session_payload = {
+            "timestamp": stamp,
+            "input_source": str(args.source),
+            "model_run_name": bundle["run_name"],
+            "remote_run_dir": str(args.remote_run_dir),
+            "cache_dir": str(cache_dir),
+            "device": str(device),
+            "trigger_mode": args.trigger_mode,
+            "emitted_labels": emitted_labels,
+            "reset_events": reset_events,
+            "saved_events": saved_events,
+            "calibrated_min_confidence": calibrated_min_confidence,
+            "decision_threshold_source": "calibrated_confidence",
+        }
+        save_prediction_logs(RESULTS_DIR, prediction_log, session_payload, stamp=stamp)
+
+    print("最終辨識句子：", " | ".join(emitted_labels) if emitted_labels else "-")
+
+
+if __name__ == "__main__":
+    main()

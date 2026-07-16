@@ -1,0 +1,4 @@
+﻿version,video_id,task_type,label_id,label_text,signer_id,split,file_name,relative_path,file_size_bytes,sha256,drive_file_id,recorded_at,source,notes
+v2.0,SENT_0001,sentence,S01,你好,SIGNER_A,train,SENT_0001.mp4,videos/raw/SENT_0001.mp4,,,,2026-05-28,team_recording,
+v2.0,GLOSS_0001,gloss,G01,謝謝,SIGNER_B,dev,GLOSS_0001.mp4,videos/raw/GLOSS_0001.mp4,,,,2026-05-28,team_recording,
+v2.0,NS_0001,nonsign,NS01,non_sign_transition,SIGNER_C,test,NS_0001.mp4,videos/raw/NS_0001.mp4,,,,2026-05-28,team_recording,

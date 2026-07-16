@@ -1,0 +1,13 @@
+{
+  "run_name": "daily30_sentence_opt_global_signer_holdout_20260715_132011",
+  "remote_run_dir": "/home/b310ai/cslr_bench/results/daily30_sentence_runs/daily30_sentence_opt_global_signer_holdout_20260715_132011",
+  "sequence_length": 72,
+  "frame_step": 1,
+  "hidden_size": 160,
+  "num_layers": 2,
+  "dropout": 0.55,
+  "pooling": "mean_max",
+  "append_delta": true,
+  "zscore_features": true,
+  "device": "auto"
+}
