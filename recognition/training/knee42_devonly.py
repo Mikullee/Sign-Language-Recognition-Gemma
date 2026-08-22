@@ -352,7 +352,7 @@ def train_dev_only(
             if patience_left <= 0:
                 break
 
-    checkpoint = torch.load(out_dir / "best_model.pt", map_location=device, weights_only=False)
+    checkpoint = torch.load(out_dir / "best_model.pt", map_location=device, weights_only=True)
     model.load_state_dict(checkpoint["state_dict"])
     dev_result, dev_confusion, dev_rows_out, dev_probs = evaluate(model, dev_loader, device)
     write_evaluation(out_dir, "dev", dev_result, dev_confusion, dev_rows_out, dev_probs, label_to_idx)

@@ -163,7 +163,7 @@ def evaluate_j_once(
     checkpoint = torch.load(
         candidate_dir / "best_model.pt",
         map_location=device,
-        weights_only=False,
+        weights_only=True,
     )
     model_config = checkpoint.get("model_config")
     if not isinstance(model_config, dict):

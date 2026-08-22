@@ -466,6 +466,7 @@ manifest 的欄位規格見 [`docs/schema/manifest_schema.md`](docs/schema/manif
 ```python
 import csv, json
 from pathlib import Path
+import torch
 from recognition.training.knee42_devonly import DevOnlyConfig, train_dev_only
 
 rows = list(csv.DictReader(open(
@@ -477,9 +478,11 @@ train_dev_only(
     rows=rows, config=cfg,
     split_hash="<split_sha256>",
     manifest_hash="<manifest_sha256>",
+    feature_ledger_hash="<feature_ledger_sha256>",
     feature_dir=Path("artifacts/knee42/features_final"),
     out_dir=Path("artifacts/knee42/iterations/<run_id>/seed44"),
     seed=44,
+    device=torch.device("cuda" if torch.cuda.is_available() else "cpu"),
 )
 ```
 
@@ -520,7 +523,7 @@ Round 3–10 雖有更高的 Dev 分數，但違反已凍結的 64 幀輸入契�
 python -m unittest discover -s tests -p "test_knee42*.py" -v
 ```
 
-涵蓋 split policy、J Test 防洩漏、rotation、左右手映射、219 維契約、64×438 前處理、standardizer、AUTO trigger、timestamp、錄影速度、second-pass、UI、camera、integrity 與 Windows packaging。
+涵蓋 split policy、J Test 防洩漏、rotation、左右手映射、219 維契約、64×438 前處理、standardizer、AUTO trigger、timestamp、錄影速度、second-pass、UI、camera 與模型完整性。Windows 可攜包不在本次公開範圍，其封裝驗收證據維持私有。
 
 ---
 

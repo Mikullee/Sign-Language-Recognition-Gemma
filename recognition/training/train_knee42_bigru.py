@@ -1,21 +1,18 @@
 #!/usr/bin/env python3
-"""Train/evaluate the gated Knee42 experiments from knee-free features_final.
+"""Shared Knee42 feature, dataset, and evaluation utilities.
 
-Selection is strictly Dev macro Top-1.  Test is evaluated after a run has
-finished and never feeds model selection or configuration.
+The original train-and-Test entry point is retired because the one-time J/Test
+budget has been consumed.  New research training must use the Dev-only module.
 """
 from __future__ import annotations
 
-import argparse
 import csv
 import hashlib
 import json
 import os
-import random
-import shutil
 import tempfile
 from collections import Counter
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -24,7 +21,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 
-from recognition.inference.daily30_sentence_model_utils import BiGRUSentenceClassifier
+from recognition.training.knee42_policy import validate_research_rows
 
 
 LABELS = [f"K42_{number:02d}" for number in range(1, 43)]
@@ -214,97 +211,24 @@ class Config:
 
 
 def train_one(rows: list[dict[str, str]], manifest_hash: str, split_hash: str, feature_dir: Path, out_dir: Path, seed: int, device: torch.device, config: Config) -> dict[str, Any]:
-    out_dir.mkdir(parents=True, exist_ok=True)
-    random.seed(seed); np.random.seed(seed); torch.manual_seed(seed)
-    if device.type == "cuda": torch.cuda.manual_seed_all(seed)
-    label_to_idx = {label: index for index, label in enumerate(LABELS)}
-    display = {label: next(row["display_text"] for row in rows if row["label_id"] == label) for label in LABELS}
-    train_rows = [row for row in rows if row["split"] == "train"]
-    dev_rows = [row for row in rows if row["split"] == "dev"]
-    test_rows = [row for row in rows if row["split"] == "test"]
-    for name, group in (("train", train_rows), ("dev", dev_rows), ("test", test_rows)):
-        missing = set(LABELS) - {row["label_id"] for row in group}
-        if missing: raise ValueError(f"{name} missing labels: {sorted(missing)}")
-    mean, std = fit_standardizer(train_rows, feature_dir)
-    np.savez_compressed(out_dir / "standardizer_train_only.npz", mean=mean, std=std)
-    datasets = {name: Knee42Dataset(group, feature_dir, label_to_idx, mean, std, config.sequence_length) for name, group in (("train", train_rows), ("dev", dev_rows), ("test", test_rows))}
-    train_loader = DataLoader(datasets["train"], batch_size=config.batch_size, sampler=sampler(train_rows, seed), num_workers=0, collate_fn=collate_batch)
-    dev_loader = DataLoader(datasets["dev"], batch_size=config.batch_size, shuffle=False, num_workers=0, collate_fn=collate_batch)
-    test_loader = DataLoader(datasets["test"], batch_size=config.batch_size, shuffle=False, num_workers=0, collate_fn=collate_batch)
-    input_dim = mean.size * 2
-    model = BiGRUSentenceClassifier(input_dim=input_dim, hidden_size=config.hidden_size, num_layers=config.num_layers, dropout=config.dropout, num_classes=len(LABELS), pooling="mean_max").to(device)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=config.learning_rate, weight_decay=config.weight_decay)
-    criterion = nn.CrossEntropyLoss(label_smoothing=config.label_smoothing)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="max", factor=0.5, patience=3)
-    best = -1.0; best_epoch = 0; patience = config.patience; history = []
-    for epoch in range(1, config.epochs + 1):
-        model.train(); train_loss = []; correct = total = 0
-        for features, labels, _ in train_loader:
-            optimizer.zero_grad(set_to_none=True)
-            logits = model(features.to(device)); loss = criterion(logits, labels.to(device)); loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0); optimizer.step()
-            train_loss.append(float(loss.item())); correct += int((logits.argmax(1).cpu() == labels).sum()); total += len(labels)
-        dev_result, _, _, _ = evaluate(model, dev_loader, device)
-        scheduler.step(dev_result["macro_top1"])
-        record = {"epoch": epoch, "learning_rate": float(optimizer.param_groups[0]["lr"]), "train_loss": float(np.mean(train_loss)), "train_overall_top1": correct / max(total, 1), **{f"dev_{key}": value for key, value in dev_result.items() if key != "per_class_top1"}}
-        history.append(record); print(json.dumps(record, ensure_ascii=False), flush=True)
-        checkpoint = {"checkpoint_version": "knee42_bigru_v1", "state_dict": model.state_dict(), "model_config": {"input_dim": input_dim, "hidden_size": config.hidden_size, "num_layers": config.num_layers, "dropout": config.dropout, "pooling": "mean_max", "num_classes": len(LABELS)}, "seed": seed, "manifest_sha256": manifest_hash, "split_sha256": split_hash, "feature_contract": "knee42_features_final_without_pose_25_26_or_knee_masks"}
-        atomic_torch(out_dir / "last_checkpoint.pt", checkpoint)
-        if dev_result["macro_top1"] > best:
-            best = dev_result["macro_top1"]; best_epoch = epoch; patience = config.patience; atomic_torch(out_dir / "best_model.pt", checkpoint)
-        else:
-            patience -= 1
-            if patience <= 0: break
-    best_checkpoint = torch.load(out_dir / "best_model.pt", map_location=device, weights_only=False)
-    model.load_state_dict(best_checkpoint["state_dict"])
-    dev_result, dev_confusion, dev_meta, dev_probs = evaluate(model, dev_loader, device)
-    write_evaluation(out_dir, "dev", dev_result, dev_confusion, dev_meta, dev_probs, label_to_idx)
-    # Formal held-out J test: evaluated only after selecting this run's checkpoint by Dev.
-    test_result, test_confusion, test_meta, test_probs = evaluate(model, test_loader, device)
-    write_evaluation(out_dir, "test", test_result, test_confusion, test_meta, test_probs, label_to_idx)
-    atomic_json(out_dir / "train_history.json", history)
-    atomic_json(out_dir / "label_map_knee42.json", {"label_to_idx": label_to_idx, "idx_to_label": LABELS})
-    atomic_json(out_dir / "display_text_map.json", display)
-    atomic_json(out_dir / "feature_config.json", {"features_final": "knee42_features_final_v1", "input_dim": input_dim, "sequence_length": config.sequence_length, "standardizer": "fit_train_split_observed_values_only_then_neutral_fill", "mask_concatenated": True, "knee_indices_removed": [25, 26]})
-    atomic_json(out_dir / "training_config.json", {**asdict(config), "seed": seed, "device": str(device), "selection_metric": "dev_macro_top1", "test_used_for_selection": False})
-    (out_dir / "manifest_sha256.txt").write_text(manifest_hash + "\n", encoding="ascii"); (out_dir / "split_sha256.txt").write_text(split_hash + "\n", encoding="ascii")
-    summary = {"seed": seed, "best_epoch": best_epoch, "selection_metric": "dev_macro_top1", "dev": {key: dev_result[key] for key in ("macro_top1", "overall_top1", "top3")}, "test": {key: test_result[key] for key in ("macro_top1", "overall_top1", "top3")}, "device": str(device), "gate": "PROVISIONAL"}
-    atomic_json(out_dir / "train_summary.json", summary)
-    return summary
+    """Retired legacy trainer kept only for import compatibility.
+
+    The original implementation evaluated held-out J/Test after every seed.  That
+    one-time test budget has already been consumed, so this entry point now
+    fails closed.  Shared dataset and evaluation helpers remain in this module
+    for the Dev-only trainer.
+    """
+    validate_research_rows(rows)
+    raise RuntimeError(
+        "legacy trainer retired: use scripts/train_knee42_devonly.py so only "
+        "Train/Dev rows can enter the research path"
+    )
 
 
 def main(argv: Sequence[str] | None = None) -> None:
-    parser = argparse.ArgumentParser(description="Run three fixed-seed gated Knee42 experiments.")
-    parser.add_argument("--manifest", required=True, type=Path); parser.add_argument("--gate-summary", required=True, type=Path); parser.add_argument("--feature-dir", required=True, type=Path); parser.add_argument("--out-dir", required=True, type=Path); parser.add_argument("--champion-dir", required=True, type=Path); parser.add_argument("--seeds", nargs="+", type=int, default=[42, 43, 44]); parser.add_argument("--device", choices=["cpu", "cuda", "auto"], default="auto")
-    args = parser.parse_args(argv)
-    gate = json.loads(args.gate_summary.read_text(encoding="utf-8"))
-    if gate.get("gate") not in {"READY", "PROVISIONAL"}: raise SystemExit(f"gate is {gate.get('gate')}; training forbidden")
-    rows = read_csv(args.manifest)
-    manifest_hash = (args.manifest.parent / "manifest_sha256.txt").read_text(encoding="ascii").strip(); split_hash = (args.manifest.parent / "split_sha256.txt").read_text(encoding="ascii").strip()
-    config = Config(); device = torch.device("cuda" if args.device == "cuda" or (args.device == "auto" and torch.cuda.is_available()) else "cpu")
-    args.out_dir.mkdir(parents=True, exist_ok=True)
-    summaries = []
-    for seed in args.seeds:
-        run_dir = args.out_dir / f"seed_{seed}"
-        try:
-            summaries.append(train_one(rows, manifest_hash, split_hash, args.feature_dir, run_dir, seed, device, config))
-        except RuntimeError as exc:
-            allocation_failure = any(token in str(exc).lower() for token in ("out of memory", "cuda error", "cublas_status_alloc_failed"))
-            if device.type != "cuda" or not allocation_failure:
-                raise
-            # Existing services own most GPU memory.  Preserve the run and safely
-            # retry on CPU rather than terminating an unrelated service.
-            print(json.dumps({"seed": seed, "device_fallback": "cpu", "reason": str(exc)}), flush=True)
-            torch.cuda.empty_cache()
-            device = torch.device("cpu")
-            summaries.append(train_one(rows, manifest_hash, split_hash, args.feature_dir, run_dir, seed, device, config))
-    champion = max(summaries, key=lambda item: item["dev"]["macro_top1"])
-    champion_source = args.out_dir / f"seed_{champion['seed']}"
-    if args.champion_dir.exists(): shutil.rmtree(args.champion_dir)
-    shutil.copytree(champion_source, args.champion_dir)
-    aggregate = {"gate": gate["gate"], "selection_metric": "dev_macro_top1", "champion_seed": champion["seed"], "runs": summaries, "mean_std": {split: {metric: {"mean": float(np.mean([item[split][metric] for item in summaries])), "std": float(np.std([item[split][metric] for item in summaries], ddof=0))} for metric in ("macro_top1", "overall_top1", "top3")} for split in ("dev", "test")}}
-    atomic_json(args.out_dir / "experiment_summary.json", aggregate); atomic_json(args.champion_dir / "champion_summary.json", aggregate)
-    print(json.dumps(aggregate, ensure_ascii=False, indent=2))
+    raise SystemExit(
+        "legacy trainer retired; run python scripts/train_knee42_devonly.py --help"
+    )
 
 
 if __name__ == "__main__":

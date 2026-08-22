@@ -133,8 +133,12 @@ class DevOnlyTrainerTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "label_smoothing"):
             build_criterion(DevOnlyConfig(loss="focal", label_smoothing=0.15))
 
-    def test_baseline_config_matches_frozen_seed_44_method(self):
-        config = json.loads((ROOT / "configs" / "knee42_devonly_baseline.json").read_text(encoding="utf-8"))
+    def test_round0_config_matches_frozen_seed_44_baseline(self):
+        config = json.loads(
+            (ROOT / "configs" / "knee42" / "round0_config.json").read_text(
+                encoding="utf-8"
+            )
+        )
 
         self.assertEqual(config["sequence_length"], 64)
         self.assertEqual(config["hidden_size"], 128)
@@ -190,7 +194,7 @@ class DevOnlyTrainerTests(unittest.TestCase):
                 device=torch.device("cpu"),
                 config=config,
             )
-            checkpoint = torch.load(out_dir / "best_model.pt", map_location="cpu", weights_only=False)
+            checkpoint = torch.load(out_dir / "best_model.pt", map_location="cpu", weights_only=True)
             saved = json.loads((out_dir / "train_summary.json").read_text(encoding="utf-8"))
             names = [path.name.lower() for path in out_dir.iterdir()]
 

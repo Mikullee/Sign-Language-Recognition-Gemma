@@ -277,7 +277,7 @@ def load_bundle(bundle_dir: Path, *, device: torch.device) -> Knee42Bundle:
         checkpoint = torch.load(
             bundle_dir / "best_model.pt",
             map_location=device,
-            weights_only=False,
+            weights_only=True,
         )
         model_config = checkpoint["model_config"]
         if int(model_config.get("input_dim", -1)) != MODEL_INPUT_DIM:

@@ -28,6 +28,10 @@ from recognition.realtime.knee42_ivcam import (
 from recognition.training.train_knee42_bigru import LABELS
 
 
+class UnsafeCheckpointPayload:
+    pass
+
+
 def sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -158,6 +162,33 @@ class FakeDetectorContext:
 
 
 class RuntimeTests(unittest.TestCase):
+    def test_bundle_rejects_non_weight_checkpoint_payload(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            bundle = make_bundle(Path(temp_dir))
+            model_path = bundle / "best_model.pt"
+            checkpoint = torch.load(model_path, map_location="cpu", weights_only=True)
+            checkpoint["untrusted_payload"] = UnsafeCheckpointPayload()
+            torch.save(checkpoint, model_path)
+
+            ledger_path = bundle / "selection_ledger.json"
+            ledger = json.loads(ledger_path.read_text(encoding="utf-8"))
+            ledger["artifacts"]["best_model.pt"] = sha256(model_path)
+            write_json(ledger_path, ledger)
+
+            names = []
+            for line in (bundle / "integrity_manifest.sha256").read_text(
+                encoding="ascii"
+            ).splitlines():
+                _digest, name = line.split(maxsplit=1)
+                names.append(name)
+            (bundle / "integrity_manifest.sha256").write_text(
+                "".join(f"{sha256(bundle / name)}  {name}\n" for name in names),
+                encoding="ascii",
+            )
+
+            with self.assertRaisesRegex(IntegrityError, "Weights only load failed"):
+                load_bundle(bundle, device=torch.device("cpu"))
+
     def test_structured_display_data_keeps_e2_predictions_and_model_version(self):
         builder = getattr(knee42_ivcam, "build_display_panel_data", None)
         self.assertTrue(callable(builder))

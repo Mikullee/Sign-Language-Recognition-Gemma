@@ -8,14 +8,15 @@
   "patience": 8,
   "learning_rate": 0.001,
   "weight_decay": 0.0001,
-  "label_smoothing": 0.15,
+  "label_smoothing": 0.0,
   "focal_gamma": 2.0,
   "sampler": "balanced",
-  "loss": "cross_entropy",
+  "loss": "focal",
   "augmentation": "coordinate_jitter",
-  "coordinate_scale_jitter": 0.10,
+  "coordinate_scale_jitter": 0.1,
   "coordinate_translation_jitter": 0.035,
+  "landmark_dropout_probability": 0.0,
   "normalization": "observed_train_standardizer",
   "feature_mode": "values_mask",
-  "pooling": "mean"
+  "pooling": "mean_max"
 }

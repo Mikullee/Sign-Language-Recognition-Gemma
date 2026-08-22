@@ -78,6 +78,7 @@ python -m pip install -r requirements.lock.txt
 ```python
 import csv, json
 from pathlib import Path
+import torch
 from recognition.training.knee42_devonly import DevOnlyConfig, train_dev_only
 
 rows = list(csv.DictReader(open(
@@ -89,9 +90,11 @@ train_dev_only(
     rows=rows, config=cfg,
     split_hash="<split_sha256>",
     manifest_hash="<manifest_sha256>",
+    feature_ledger_hash="<feature_ledger_sha256>",
     feature_dir=Path("artifacts/knee42/features_final"),
     out_dir=Path("artifacts/knee42/iterations/reproduce/seed44"),
     seed=44,
+    device=torch.device("cuda" if torch.cuda.is_available() else "cpu"),
 )
 ```
 

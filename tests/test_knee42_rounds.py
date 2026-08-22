@@ -88,142 +88,60 @@ class DiagnosticPolicyTests(unittest.TestCase):
 
 
 class RoundPolicyTests(unittest.TestCase):
-    def test_round01_config_changes_only_hidden_size_in_architecture_group(self):
-        baseline = DevOnlyConfig(
-            **json.loads((ROOT / "configs" / "knee42_devonly_baseline.json").read_text())
-        )
-        candidate = DevOnlyConfig(
-            **json.loads((ROOT / "configs" / "knee42_round01_hidden64.json").read_text())
-        )
+    @staticmethod
+    def _round(number: int) -> DevOnlyConfig:
+        path = ROOT / "configs" / "knee42" / f"round{number}_config.json"
+        return DevOnlyConfig(**json.loads(path.read_text()))
 
-        changed = validate_single_factor(baseline, candidate, "architecture")
-
-        self.assertEqual(changed, {"hidden_size"})
-        self.assertEqual(candidate.hidden_size, 64)
-
-    def test_round02_config_changes_only_label_smoothing_in_loss_group(self):
-        baseline = DevOnlyConfig(
-            **json.loads((ROOT / "configs" / "knee42_devonly_baseline.json").read_text())
-        )
-        candidate = DevOnlyConfig(
-            **json.loads((ROOT / "configs" / "knee42_round02_smoothing15.json").read_text())
-        )
-
-        changed = validate_single_factor(baseline, candidate, "loss")
-
-        self.assertEqual(changed, {"label_smoothing"})
-        self.assertEqual(candidate.label_smoothing, 0.15)
-
-    def test_round03_config_changes_only_sequence_length_from_promoted_round02(self):
-        parent = DevOnlyConfig(
-            **json.loads((ROOT / "configs" / "knee42_round02_smoothing15.json").read_text())
-        )
-        candidate = DevOnlyConfig(
-            **json.loads((ROOT / "configs" / "knee42_round03_seq80.json").read_text())
-        )
-
-        changed = validate_single_factor(parent, candidate, "temporal")
-
-        self.assertEqual(changed, {"sequence_length"})
-        self.assertEqual(candidate.sequence_length, 80)
-
-    def test_round04_config_changes_only_weight_decay_from_promoted_round02(self):
-        parent = DevOnlyConfig(
-            **json.loads((ROOT / "configs" / "knee42_round02_smoothing15.json").read_text())
-        )
-        candidate = DevOnlyConfig(
-            **json.loads((ROOT / "configs" / "knee42_round04_weightdecay1e3.json").read_text())
-        )
-
-        changed = validate_single_factor(parent, candidate, "optimization")
-
-        self.assertEqual(changed, {"weight_decay"})
-        self.assertEqual(candidate.weight_decay, 0.001)
-
-    def test_round05_config_changes_only_focal_loss_group_from_promoted_round02(self):
-        parent = DevOnlyConfig(
-            **json.loads((ROOT / "configs" / "knee42_round02_smoothing15.json").read_text())
-        )
-        candidate = DevOnlyConfig(
-            **json.loads((ROOT / "configs" / "knee42_round05_focal.json").read_text())
-        )
-
-        changed = validate_single_factor(parent, candidate, "loss")
-
-        self.assertEqual(changed, {"loss", "label_smoothing"})
-        self.assertEqual(candidate.loss, "focal")
-        self.assertEqual(candidate.label_smoothing, 0.0)
-        self.assertEqual(candidate.focal_gamma, 2.0)
-
-    def test_round06_config_changes_only_train_augmentation_from_promoted_round02(self):
-        parent = DevOnlyConfig(
-            **json.loads((ROOT / "configs" / "knee42_round02_smoothing15.json").read_text())
-        )
-        candidate = DevOnlyConfig(
-            **json.loads((ROOT / "configs" / "knee42_round06_coordinate_jitter.json").read_text())
-        )
-
-        changed = validate_single_factor(parent, candidate, "augmentation")
-
+    def test_round1_adds_coordinate_jitter_to_round0(self):
+        changed = validate_single_factor(self._round(0), self._round(1), "augmentation")
         self.assertEqual(changed, {"augmentation"})
-        self.assertEqual(candidate.augmentation, "coordinate_jitter")
+        self.assertEqual(self._round(1).augmentation, "coordinate_jitter")
 
-    def test_round07_config_only_reduces_coordinate_jitter_strength(self):
-        parent = DevOnlyConfig(
-            **json.loads((ROOT / "configs" / "knee42_round06_coordinate_jitter.json").read_text())
-        )
-        candidate = DevOnlyConfig(
-            **json.loads((ROOT / "configs" / "knee42_round07_mild_coordinate_jitter.json").read_text())
-        )
+    def test_round2_changes_only_focal_loss_from_round1(self):
+        changed = validate_single_factor(self._round(1), self._round(2), "loss")
+        self.assertEqual(changed, {"loss", "label_smoothing"})
+        self.assertEqual(self._round(2).loss, "focal")
 
-        changed = validate_single_factor(parent, candidate, "augmentation")
+    def test_round3_changes_only_sequence_length_from_round1(self):
+        changed = validate_single_factor(self._round(1), self._round(3), "temporal")
+        self.assertEqual(changed, {"sequence_length"})
+        self.assertEqual(self._round(3).sequence_length, 96)
 
-        self.assertEqual(
-            changed,
-            {"coordinate_scale_jitter", "coordinate_translation_jitter"},
-        )
-        self.assertEqual(candidate.coordinate_scale_jitter, 0.05)
-        self.assertEqual(candidate.coordinate_translation_jitter, 0.02)
-
-    def test_round08_config_only_changes_pooling_from_promoted_round06(self):
-        parent = DevOnlyConfig(
-            **json.loads((ROOT / "configs" / "knee42_round06_coordinate_jitter.json").read_text())
-        )
-        candidate = DevOnlyConfig(
-            **json.loads((ROOT / "configs" / "knee42_round08_mean_pooling.json").read_text())
-        )
-
-        changed = validate_single_factor(parent, candidate, "architecture")
-
-        self.assertEqual(changed, {"pooling"})
-        self.assertEqual(candidate.pooling, "mean")
-
-    def test_round09_config_only_increases_patience_from_promoted_round06(self):
-        parent = DevOnlyConfig(
-            **json.loads((ROOT / "configs" / "knee42_round06_coordinate_jitter.json").read_text())
-        )
-        candidate = DevOnlyConfig(
-            **json.loads((ROOT / "configs" / "knee42_round09_patience12.json").read_text())
-        )
-
-        changed = validate_single_factor(parent, candidate, "optimization")
-
-        self.assertEqual(changed, {"patience"})
-        self.assertEqual(candidate.patience, 12)
-
-    def test_round10_config_only_adds_train_landmark_dropout_to_round06(self):
-        parent = DevOnlyConfig(
-            **json.loads((ROOT / "configs" / "knee42_round06_coordinate_jitter.json").read_text())
-        )
-        candidate = DevOnlyConfig(
-            **json.loads((ROOT / "configs" / "knee42_round10_landmark_dropout.json").read_text())
-        )
-
-        changed = validate_single_factor(parent, candidate, "augmentation")
-
+    def test_round4_adds_landmark_dropout_to_round3(self):
+        changed = validate_single_factor(self._round(3), self._round(4), "augmentation")
         self.assertEqual(changed, {"augmentation", "landmark_dropout_probability"})
-        self.assertEqual(candidate.augmentation, "coordinate_jitter_landmark_dropout")
-        self.assertEqual(candidate.landmark_dropout_probability, 0.05)
+        self.assertEqual(self._round(4).landmark_dropout_probability, 0.05)
+
+    def test_round5_changes_only_dropout_from_round3(self):
+        changed = validate_single_factor(self._round(3), self._round(5), "architecture")
+        self.assertEqual(changed, {"dropout"})
+        self.assertEqual(self._round(5).dropout, 0.60)
+
+    def test_round6_changes_only_weight_decay_from_round3(self):
+        changed = validate_single_factor(self._round(3), self._round(6), "optimization")
+        self.assertEqual(changed, {"weight_decay"})
+        self.assertEqual(self._round(6).weight_decay, 0.001)
+
+    def test_round7_changes_only_pooling_from_round3(self):
+        changed = validate_single_factor(self._round(3), self._round(7), "architecture")
+        self.assertEqual(changed, {"pooling"})
+        self.assertEqual(self._round(7).pooling, "mean")
+
+    def test_round8_changes_only_hidden_size_from_round3(self):
+        changed = validate_single_factor(self._round(3), self._round(8), "architecture")
+        self.assertEqual(changed, {"hidden_size"})
+        self.assertEqual(self._round(8).hidden_size, 192)
+
+    def test_round9_changes_only_recurrent_depth_from_round3(self):
+        changed = validate_single_factor(self._round(3), self._round(9), "architecture")
+        self.assertEqual(changed, {"num_layers"})
+        self.assertEqual(self._round(9).num_layers, 1)
+
+    def test_round10_changes_only_sequence_length_from_round1(self):
+        changed = validate_single_factor(self._round(1), self._round(10), "temporal")
+        self.assertEqual(changed, {"sequence_length"})
+        self.assertEqual(self._round(10).sequence_length, 128)
 
     def test_diagnostic_and_round_scripts_support_direct_help(self):
         for script in ("diagnose_knee42_dev.py", "run_knee42_round.py"):
