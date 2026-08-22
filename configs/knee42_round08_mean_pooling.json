@@ -1,0 +1,21 @@
+{
+  "sequence_length": 64,
+  "hidden_size": 128,
+  "num_layers": 2,
+  "dropout": 0.45,
+  "batch_size": 24,
+  "epochs": 45,
+  "patience": 8,
+  "learning_rate": 0.001,
+  "weight_decay": 0.0001,
+  "label_smoothing": 0.15,
+  "focal_gamma": 2.0,
+  "sampler": "balanced",
+  "loss": "cross_entropy",
+  "augmentation": "coordinate_jitter",
+  "coordinate_scale_jitter": 0.10,
+  "coordinate_translation_jitter": 0.035,
+  "normalization": "observed_train_standardizer",
+  "feature_mode": "values_mask",
+  "pooling": "mean"
+}
