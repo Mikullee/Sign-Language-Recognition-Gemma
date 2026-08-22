@@ -1,0 +1,5 @@
+# Files bound by Knee42 provenance hashes must have stable checkout bytes.
+configs/knee42/*.json text eol=lf
+packaging/knee42_ivcam/auto_trigger_knee_ivcam_local.json text eol=lf
+recognition/realtime/auto_trigger.py text eol=lf
+recognition/realtime/knee42_controllers.py text eol=lf
