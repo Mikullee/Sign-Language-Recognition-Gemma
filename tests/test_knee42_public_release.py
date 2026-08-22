@@ -102,7 +102,8 @@ class PublishedConfigLineageTests(unittest.TestCase):
     def test_public_configs_are_the_exact_executed_rounds(self):
         config_dir = ROOT / "configs" / "knee42"
         for name, expected_hash in self.EXPECTED_SHA256.items():
-            actual_hash = hashlib.sha256((config_dir / name).read_bytes()).hexdigest()
+            payload = (config_dir / name).read_bytes().replace(b"\r\n", b"\n")
+            actual_hash = hashlib.sha256(payload).hexdigest()
             self.assertEqual(actual_hash, expected_hash, name)
 
     def test_mislabelled_proposal_configs_are_not_published_as_round_history(self):

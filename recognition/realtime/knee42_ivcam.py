@@ -75,6 +75,12 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def sha256_canonical_text_file(path: Path) -> str:
+    """Hash locked text identically after LF or Windows CRLF checkout."""
+    payload = path.read_bytes().replace(b"\r\n", b"\n")
+    return hashlib.sha256(payload).hexdigest()
+
+
 def verify_integrity_manifest(bundle_dir: Path) -> dict[str, str]:
     bundle_dir = Path(bundle_dir).resolve()
     manifest = bundle_dir / "integrity_manifest.sha256"
@@ -131,7 +137,7 @@ def verify_auto_trigger_provenance(package_root: Path) -> dict[str, Any]:
         if not path.is_file():
             raise IntegrityError(f"{description} missing: {path}")
         wanted = str(provenance.get(key, "")).lower()
-        actual = sha256_file(path)
+        actual = sha256_canonical_text_file(path)
         if len(wanted) != 64 or actual != wanted:
             raise IntegrityError(
                 f"{description} SHA-256 mismatch: expected {wanted}, actual {actual}"
