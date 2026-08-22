@@ -40,6 +40,8 @@ def body_vector(left_xy: tuple[float, float], right_xy: tuple[float, float]) -> 
     pose[16] = [right_xy[0], right_xy[1], 0.0]
     pose[23] = [0.44, 0.70, 0.0]
     pose[24] = [0.56, 0.70, 0.0]
+    pose[25] = [0.36, 0.90, 0.0]
+    pose[26] = [0.64, 0.90, 0.0]
     left = np.tile(np.array([left_xy[0], left_xy[1], 0.0], dtype=np.float32), (21, 1))
     right = np.tile(np.array([right_xy[0], right_xy[1], 0.0], dtype=np.float32), (21, 1))
     return np.concatenate([pose.reshape(-1), left.reshape(-1), right.reshape(-1)])
@@ -50,7 +52,7 @@ def synthetic_cache() -> VideoLandmarkCache:
     vectors = []
     for time_sec in timestamps:
         if time_sec < 0.5 or time_sec >= 1.2:
-            vectors.append(body_vector((0.30, 0.78), (0.70, 0.78)))
+            vectors.append(body_vector((0.36, 0.90), (0.64, 0.90)))
         elif time_sec < 0.8:
             progress = (time_sec - 0.5) / 0.3
             vectors.append(
@@ -192,8 +194,8 @@ class BoundaryEvaluationTests(unittest.TestCase):
             "end_hold_sec": [0.30],
             "end_rest_vote_ratio": [0.75],
             "blank_motion_threshold": [0.018],
-            "side_margin_ratio": [0.18],
-            "chest_drop_ratio": [0.28],
+            "knee_lateral_thigh_margin_ratio": [0.55],
+            "knee_min_thigh_progress_ratio": [-0.85],
         }
         start_grid = {
             "start_motion_threshold": [0.015],
@@ -294,7 +296,7 @@ class ClassificationComparisonTests(unittest.TestCase):
 
 class OutputTests(unittest.TestCase):
     def test_write_outputs_creates_metrics_summary_and_best_config(self):
-        annotation = VideoAnnotation(Path("demo.mp4"), "可以", 0.5, 1.2, "")
+        annotation = VideoAnnotation(Path("C:/private-host-account/demo.mp4"), "可以", 0.5, 1.2, "")
         metrics = VideoBoundaryMetrics.from_prediction(
             annotation,
             segment(0.45, 1.25, 1.75),
@@ -329,6 +331,7 @@ class OutputTests(unittest.TestCase):
                 rows = list(csv.DictReader(file))
 
         self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["video_path"], "demo.mp4")
         self.assertTrue(summary["all_videos_passed"])
         self.assertEqual(summary["classification"]["auto_correct_count"], 1)
         self.assertEqual(config["end_hold_sec"], 0.60)

@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 from collections import deque
+from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 
@@ -18,6 +19,18 @@ from mediapipe.tasks.python.vision.hand_landmarker import HandLandmarker, HandLa
 from mediapipe.tasks.python.vision.pose_landmarker import PoseLandmarker, PoseLandmarkerOptions
 
 from recognition.config import preview_paths
+from recognition.evaluation.team_test_report import export_team_test_reports
+from recognition.evaluation.team_test_session import (
+    NO_DETECTION_LABEL,
+    TEAM_PHASE_ARMED,
+    TEAM_PHASE_COMPLETE,
+    TEAM_PHASE_READY,
+    TEAM_PHASE_REVIEW,
+    TeamTestSession,
+    TeamTestWorkflow,
+    sha256_file,
+    validate_team_test_labels,
+)
 from recognition.inference.daily30_sentence_feature_utils import build_feature_sequence
 from recognition.inference.daily30_sentence_model_utils import BiGRUSentenceClassifier
 from recognition.inference.daily30_sentence_realtime_utils import (
@@ -41,6 +54,11 @@ from recognition.realtime.auto_trigger import (
     AutoTriggerEngine,
     analyze_frame_vector,
     load_auto_trigger_config,
+)
+from recognition.realtime.personal_temporal import (
+    PersonalTemporalModel,
+    PersonalTemporalPredictor,
+    with_temporal_probability,
 )
 
 
@@ -110,6 +128,46 @@ def localize_label(label: str, label_display: dict[str, str]) -> str:
 
 def localize_top3(top3_candidates: list[tuple[str, float]], label_display: dict[str, str]) -> list[tuple[str, float]]:
     return [(localize_label(label, label_display), score) for label, score in top3_candidates]
+
+
+@dataclass(frozen=True)
+class SegmentPrediction:
+    predicted_label_id: str
+    predicted_text: str
+    display_label: str
+    accepted: bool
+    raw_confidence: float
+    calibrated_confidence: float
+    top3_label_scores: list[tuple[str, float]]
+    top3_display_scores: list[tuple[str, float]]
+
+
+def decode_segment_prediction(
+    probs: np.ndarray,
+    labels: list[str],
+    label_display: dict[str, str],
+    calibrated_min_confidence: float,
+) -> SegmentPrediction:
+    top3_label_scores = decode_top3_candidates(probs, labels)
+    top3_display_scores = localize_top3(top3_label_scores, label_display)
+    pred_idx = int(np.argmax(probs))
+    predicted_label_id = str(labels[pred_idx])
+    predicted_text = localize_label(predicted_label_id, label_display)
+    display_label, raw_confidence, calibrated_confidence = decide_prediction_output(
+        predicted_text,
+        float(probs[pred_idx]),
+        calibrated_min_confidence,
+    )
+    return SegmentPrediction(
+        predicted_label_id=predicted_label_id,
+        predicted_text=predicted_text,
+        display_label=display_label,
+        accepted=display_label != REJECTED_LABEL,
+        raw_confidence=raw_confidence,
+        calibrated_confidence=calibrated_confidence,
+        top3_label_scores=top3_label_scores,
+        top3_display_scores=top3_display_scores,
+    )
 
 
 def draw_landmark_points(frame: np.ndarray, hand_result, pose_result) -> np.ndarray:
@@ -212,6 +270,55 @@ def draw_overlay(
     return canvas
 
 
+def draw_team_test_overlay(
+    frame: np.ndarray,
+    workflow: TeamTestWorkflow,
+) -> np.ndarray:
+    canvas = frame.copy()
+    session = workflow.session
+    _, w = canvas.shape[:2]
+    panel_right = min(w - 12, 920)
+    cv2.rectangle(canvas, (12, 160), (panel_right, 286), (0, 0, 0), -1)
+    canvas = draw_text(
+        canvas,
+        f"組員測試：{session.tester_id}　進度 {session.completed_trials}/{session.total_trials}",
+        (26, 170),
+        FONT_BODY,
+        (180, 220, 255),
+    )
+    if workflow.phase == TEAM_PHASE_COMPLETE:
+        canvas = draw_text(
+            canvas,
+            "測試完成，請按 Q 離開後執行 package_team_results.cmd",
+            (26, 205),
+            FONT_BODY,
+            (80, 255, 120),
+        )
+        return canvas
+
+    expected = session.current_expected
+    canvas = draw_text(
+        canvas,
+        f"現在請做：{expected.label_id} {expected.label_text}　（第 {expected.trial_number}/{session.trials_per_label} 次）",
+        (26, 200),
+        FONT_BODY,
+        (255, 255, 255),
+    )
+    if workflow.phase == TEAM_PHASE_READY:
+        instruction = "保持站姿待機，按 Enter 開始本次測試"
+        color = (255, 220, 120)
+    elif workflow.phase == TEAM_PHASE_ARMED:
+        instruction = "已開始：請完成手語並回到待機姿勢；完全沒觸發按 N，自己做錯按 R"
+        color = (120, 255, 255)
+    else:
+        pending = session.pending_result
+        result = "正確" if pending and pending.top1_correct else "錯誤"
+        instruction = f"本次結果：{result}　按 Enter 確認，或按 R 作廢重做"
+        color = (80, 255, 120) if pending and pending.top1_correct else (100, 100, 255)
+    canvas = draw_text(canvas, instruction, (26, 238), FONT_BODY, color)
+    return canvas
+
+
 def prepare_detection_frame(frame: np.ndarray, max_width: int) -> np.ndarray:
     if max_width <= 0:
         return frame
@@ -235,6 +342,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--min-conf-override", type=float, default=-1.0, help="Override calibrated confidence threshold in 0-1 space.")
     parser.add_argument("--trigger-mode", choices=["auto", "manual"], default=None)
     parser.add_argument("--auto-config", default="", help="JSON file containing calibrated auto-trigger settings.")
+    parser.add_argument(
+        "--temporal-model",
+        default="",
+        help="Optional personalized idle/signing model. Defaults to models/personal_temporal_knee_v1.npz when enabled.",
+    )
     parser.add_argument("--start-motion-threshold", type=float, default=None)
     parser.add_argument("--blank-motion-threshold", type=float, default=None)
     parser.add_argument("--start-hold-sec", type=float, default=None)
@@ -245,8 +357,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--min-segment-sec", type=float, default=None)
     parser.add_argument("--cooldown-sec", type=float, default=None)
     parser.add_argument("--torso-motion-weight", type=float, default=None)
-    parser.add_argument("--side-margin-ratio", type=float, default=None)
-    parser.add_argument("--chest-drop-ratio", type=float, default=None)
+    parser.add_argument("--knee-lateral-thigh-margin-ratio", type=float, default=None)
+    parser.add_argument("--knee-min-thigh-progress-ratio", type=float, default=None)
+    parser.add_argument("--knee-max-thigh-progress-ratio", type=float, default=None)
+    parser.add_argument("--reference-rest-distance-threshold", type=float, default=None)
     parser.add_argument("--pose-visibility-threshold", type=float, default=None)
     parser.add_argument("--hidden-rest-enabled", dest="hidden_rest_enabled", action="store_true")
     parser.add_argument("--no-hidden-rest-enabled", dest="hidden_rest_enabled", action="store_false")
@@ -256,6 +370,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--width", type=int, default=1280)
     parser.add_argument("--height", type=int, default=900)
     parser.add_argument("--max-frames", type=int, default=0, help="Stop automatically after N frames. 0 disables auto-stop.")
+    parser.add_argument("--team-test", action="store_true", help="Run the guided 27-class teammate evaluation workflow.")
+    parser.add_argument("--tester-id", default="", help="Pseudonymous teammate identifier used for resumable results.")
+    parser.add_argument("--trials-per-label", type=int, default=10)
+    parser.add_argument("--resume", action="store_true", help="Resume compatible saved team-test progress.")
     return parser.parse_args(argv)
 
 
@@ -290,6 +408,11 @@ def resolve_runtime_args(args: argparse.Namespace) -> argparse.Namespace:
         raise ValueError("backend must be 'auto' or 'dshow'.")
     if args.trigger_mode not in {"auto", "manual"}:
         raise ValueError("trigger_mode must be 'auto' or 'manual'.")
+    if args.team_test:
+        args.trigger_mode = "auto"
+        args.save_log = False
+        if args.trials_per_label <= 0:
+            raise ValueError("trials_per_label must be positive")
     return args
 
 
@@ -354,9 +477,9 @@ def select_torch_device(preferred_device: str | None = None) -> torch.device:
 def build_auto_trigger_config(args: argparse.Namespace) -> AutoTriggerConfig:
     auto_config_path: str | Path | None = args.auto_config or None
     if auto_config_path is None:
-        bundled_config = Path(args.model_cache_dir) / "best_auto_trigger.json"
-        if bundled_config.exists():
-            auto_config_path = bundled_config
+        knee_config = Path(__file__).resolve().parents[2] / "configs" / "auto_trigger_knee_v1.json"
+        if knee_config.exists():
+            auto_config_path = knee_config
     return load_auto_trigger_config(
         auto_config_path,
         overrides={
@@ -371,11 +494,28 @@ def build_auto_trigger_config(args: argparse.Namespace) -> AutoTriggerConfig:
             "cooldown_sec": args.cooldown_sec,
             "torso_motion_weight": args.torso_motion_weight,
             "hidden_rest_enabled": args.hidden_rest_enabled,
-            "side_margin_ratio": args.side_margin_ratio,
-            "chest_drop_ratio": args.chest_drop_ratio,
+            "knee_lateral_thigh_margin_ratio": args.knee_lateral_thigh_margin_ratio,
+            "knee_min_thigh_progress_ratio": args.knee_min_thigh_progress_ratio,
+            "knee_max_thigh_progress_ratio": args.knee_max_thigh_progress_ratio,
+            "reference_rest_distance_threshold": args.reference_rest_distance_threshold,
             "pose_visibility_threshold": args.pose_visibility_threshold,
         },
     )
+
+
+def load_personal_temporal_model(args: argparse.Namespace, config: AutoTriggerConfig) -> PersonalTemporalModel | None:
+    """Load the optional gate without preventing the safe rule-only fallback."""
+    if not config.temporal_classifier_enabled:
+        return None
+    model_path = Path(args.temporal_model) if args.temporal_model else ROOT / "models" / "personal_temporal_knee_v1.npz"
+    if not model_path.exists():
+        print(f"Personal temporal model unavailable ({model_path}); using calibrated rule-only fallback.")
+        return None
+    try:
+        return PersonalTemporalModel.load(model_path)
+    except (OSError, ValueError) as error:
+        print(f"Could not load personal temporal model ({error}); using calibrated rule-only fallback.")
+        return None
 
 
 def reset_runtime_state(emitted_labels: list[str]) -> None:
@@ -383,18 +523,41 @@ def reset_runtime_state(emitted_labels: list[str]) -> None:
 
 
 def infer_segment_prediction(frame_vectors: list[np.ndarray], sequence_length: int, append_delta: bool, zscore_features: bool, model: BiGRUSentenceClassifier, device: torch.device, labels: list[str], label_display: dict[str, str], calibrated_min_confidence: float) -> tuple[str, float, float, list[tuple[str, float]]]:
+    prediction = infer_segment_prediction_details(
+        frame_vectors,
+        sequence_length,
+        append_delta,
+        zscore_features,
+        model,
+        device,
+        labels,
+        label_display,
+        calibrated_min_confidence,
+    )
+    if prediction is None:
+        return SHORT_SEGMENT_LABEL, 0.0, 0.0, []
+    return (
+        prediction.display_label,
+        prediction.raw_confidence,
+        prediction.calibrated_confidence,
+        prediction.top3_display_scores,
+    )
+
+
+def infer_segment_prediction_details(frame_vectors: list[np.ndarray], sequence_length: int, append_delta: bool, zscore_features: bool, model: BiGRUSentenceClassifier, device: torch.device, labels: list[str], label_display: dict[str, str], calibrated_min_confidence: float) -> SegmentPrediction | None:
     seq_array = build_sequence_feature_from_list(frame_vectors, sequence_length, append_delta, zscore_features)
     if seq_array is None:
-        return SHORT_SEGMENT_LABEL, 0.0, 0.0, []
+        return None
 
     seq = torch.tensor(seq_array, dtype=torch.float32, device=device).unsqueeze(0)
     with torch.no_grad():
         probs = torch.softmax(model(seq), dim=1)[0].cpu().numpy()
-    top3_candidates = localize_top3(decode_top3_candidates(probs, labels), label_display)
-    pred_idx = int(np.argmax(probs))
-    localized_label = localize_label(str(labels[pred_idx]), label_display)
-    display_label, raw_confidence, calibrated_confidence = decide_prediction_output(localized_label, float(probs[pred_idx]), calibrated_min_confidence)
-    return display_label, raw_confidence, calibrated_confidence, top3_candidates
+    return decode_segment_prediction(
+        probs,
+        labels,
+        label_display,
+        calibrated_min_confidence,
+    )
 
 
 def main() -> None:
@@ -448,7 +611,38 @@ def main() -> None:
     )
 
     auto_config = build_auto_trigger_config(args)
-    auto_engine = AutoTriggerEngine(auto_config)
+    temporal_model = load_personal_temporal_model(args, auto_config)
+
+    def new_auto_trigger() -> tuple[AutoTriggerEngine, PersonalTemporalPredictor | None]:
+        predictor = PersonalTemporalPredictor(temporal_model, auto_config) if temporal_model is not None else None
+        return AutoTriggerEngine(auto_config), predictor
+
+    auto_engine, temporal_predictor = new_auto_trigger()
+    team_session: TeamTestSession | None = None
+    team_workflow: TeamTestWorkflow | None = None
+    team_detection_start_frame = 0
+    if args.team_test:
+        if not args.tester_id.strip():
+            raise ValueError("--tester-id is required when --team-test is enabled")
+        labels = validate_team_test_labels(bundle["labels"])
+        team_session = TeamTestSession(
+            output_dir=RESULTS_DIR,
+            tester_id=args.tester_id,
+            labels=labels,
+            label_display=bundle["label_display"],
+            trials_per_label=int(args.trials_per_label),
+            model_version=str(bundle["run_name"]),
+            runtime_metadata={
+                "model_sha256": sha256_file(bundle["paths"]["best_model"]),
+                "auto_trigger": asdict(auto_config),
+                "temporal_model_loaded": temporal_model is not None,
+                "source": str(args.source),
+                "backend": str(args.backend),
+                "confidence_threshold": calibrated_min_confidence,
+            },
+            resume=bool(args.resume),
+        )
+        team_workflow = TeamTestWorkflow(team_session)
     emitted_labels: list[str] = []
     prediction_log: list[dict] = []
     last_hand_result = None
@@ -475,7 +669,8 @@ def main() -> None:
         torso_motion_score=0.0,
         hand_motion_score=0.0,
         effective_motion_score=0.0,
-        hands_at_sides=False,
+        hands_on_knees=False,
+        knee_landmarks_valid=False,
         wrists_detected=False,
         torso_valid=False,
         explicit_hands_detected=0,
@@ -526,11 +721,22 @@ def main() -> None:
                         current_frame_vector,
                         auto_config,
                     )
-                    segment = auto_engine.update(
-                        current_frame_vector,
-                        latest_analysis,
-                        sample_timestamp_sec,
-                    )
+                    if temporal_predictor is not None:
+                        probability = temporal_predictor.update(sample_timestamp_sec, latest_analysis)
+                        latest_analysis = with_temporal_probability(latest_analysis, probability)
+                    segment = None
+                    if (
+                        team_workflow is None
+                        or (
+                            team_workflow.phase == TEAM_PHASE_ARMED
+                            and frame_index >= team_detection_start_frame
+                        )
+                    ):
+                        segment = auto_engine.update(
+                            current_frame_vector,
+                            latest_analysis,
+                            sample_timestamp_sec,
+                        )
                     if segment is not None:
                         last_finalize_reason = segment.reason
                         last_clip_start_sec = segment.clip_start_sec
@@ -541,18 +747,63 @@ def main() -> None:
                             display_raw_confidence = 0.0
                             display_calibrated_confidence = 0.0
                             top3_candidates = []
+                            if team_workflow is not None:
+                                team_workflow.stage_prediction(
+                                    predicted_label=SHORT_SEGMENT_LABEL,
+                                    raw_confidence=0.0,
+                                    calibrated_confidence=0.0,
+                                    top3_candidates=[],
+                                    clip_start_sec=segment.clip_start_sec,
+                                    clip_end_sec=segment.clip_end_sec,
+                                    finalize_sec=segment.finalize_sec,
+                                    finalize_reason=segment.reason,
+                                    outcome="short_segment",
+                                )
                         else:
-                            display_label, display_raw_confidence, display_calibrated_confidence, top3_candidates = infer_segment_prediction(
-                                segment.frame_vectors,
-                                int(bundle["sequence_length"]),
-                                bool(bundle["append_delta"]),
-                                bool(bundle["zscore_features"]),
-                                model,
-                                device,
-                                bundle["labels"],
-                                bundle["label_display"],
-                                calibrated_min_confidence,
-                            )
+                            if team_workflow is not None:
+                                detail = infer_segment_prediction_details(
+                                    segment.frame_vectors,
+                                    int(bundle["sequence_length"]),
+                                    bool(bundle["append_delta"]),
+                                    bool(bundle["zscore_features"]),
+                                    model,
+                                    device,
+                                    bundle["labels"],
+                                    bundle["label_display"],
+                                    calibrated_min_confidence,
+                                )
+                                if detail is None:
+                                    raise RuntimeError("completed segment did not contain frame features")
+                                display_label = detail.display_label
+                                display_raw_confidence = detail.raw_confidence
+                                display_calibrated_confidence = detail.calibrated_confidence
+                                top3_candidates = detail.top3_display_scores
+                                team_workflow.stage_prediction(
+                                    predicted_label=(
+                                        detail.predicted_label_id
+                                        if detail.accepted
+                                        else REJECTED_LABEL
+                                    ),
+                                    raw_confidence=detail.raw_confidence,
+                                    calibrated_confidence=detail.calibrated_confidence,
+                                    top3_candidates=detail.top3_label_scores,
+                                    clip_start_sec=segment.clip_start_sec,
+                                    clip_end_sec=segment.clip_end_sec,
+                                    finalize_sec=segment.finalize_sec,
+                                    finalize_reason=segment.reason,
+                                )
+                            else:
+                                display_label, display_raw_confidence, display_calibrated_confidence, top3_candidates = infer_segment_prediction(
+                                    segment.frame_vectors,
+                                    int(bundle["sequence_length"]),
+                                    bool(bundle["append_delta"]),
+                                    bool(bundle["zscore_features"]),
+                                    model,
+                                    device,
+                                    bundle["labels"],
+                                    bundle["label_display"],
+                                    calibrated_min_confidence,
+                                )
                             if display_label not in {REJECTED_LABEL, SHORT_SEGMENT_LABEL}:
                                 emitted_labels.append(display_label)
                     elif auto_engine.state == SEGMENT_STATE_IDLE and latest_analysis.is_blank and not emitted_labels:
@@ -560,44 +811,46 @@ def main() -> None:
 
                 previous_frame_vector = current_frame_vector
 
-            prediction_log.append(
-                {
-                    "timestamp": datetime.now().isoformat(timespec="seconds"),
-                    "frame_index": frame_index,
-                    "trigger_mode": args.trigger_mode,
-                    "manual_active": manual_active,
-                    "predicted_label": display_label,
-                    "display_label": display_label,
-                    "raw_confidence": round(float(display_raw_confidence), 4),
-                    "calibrated_confidence": round(float(display_calibrated_confidence), 4),
-                    "display_confidence": round(float(display_calibrated_confidence), 4),
-                    "decision_threshold_source": "calibrated_confidence",
-                    "top3_candidates": [{"label": label, "confidence": round(score, 4)} for label, score in top3_candidates],
-                    "segment_state": auto_engine.state if args.trigger_mode == "auto" else ("SIGNING_ACTIVE" if manual_active else "IDLE_BLANK"),
-                    "segment_status": localize_segment_state(
-                        auto_engine.state if args.trigger_mode == "auto" else (SEGMENT_STATE_ACTIVE if manual_active else SEGMENT_STATE_IDLE),
-                        args.trigger_mode,
-                    ),
-                    "segment_frame_count": len(auto_engine.segment_samples) if args.trigger_mode == "auto" else len(manual_frame_vectors),
-                    "segment_finalize_reason": last_finalize_reason,
-                    "clip_start_sec": "" if last_clip_start_sec is None else round(last_clip_start_sec, 4),
-                    "clip_end_sec": "" if last_clip_end_sec is None else round(last_clip_end_sec, 4),
-                    "finalize_sec": "" if last_finalize_sec is None else round(last_finalize_sec, 4),
-                    "is_blank": latest_analysis.is_blank,
-                    "visible_rest_blank": latest_analysis.visible_rest_blank,
-                    "hidden_rest_blank": latest_analysis.hidden_rest_blank,
-                    "torso_motion_score": round(float(latest_analysis.torso_motion_score), 6),
-                    "hand_motion_score": round(float(latest_analysis.hand_motion_score), 6),
-                    "effective_motion_score": round(float(latest_analysis.effective_motion_score), 6),
-                    "hands_at_sides": latest_analysis.hands_at_sides,
-                    "wrists_detected": latest_analysis.wrists_detected,
-                    "torso_valid": latest_analysis.torso_valid,
-                    "explicit_hands_detected": latest_analysis.explicit_hands_detected,
-                    "wrist_source_left": latest_analysis.wrist_source_left,
-                    "wrist_source_right": latest_analysis.wrist_source_right,
-                    "emitted_count": len(emitted_labels),
-                }
-            )
+            if not args.team_test:
+                prediction_log.append(
+                    {
+                        "timestamp": datetime.now().isoformat(timespec="seconds"),
+                        "frame_index": frame_index,
+                        "trigger_mode": args.trigger_mode,
+                        "manual_active": manual_active,
+                        "predicted_label": display_label,
+                        "display_label": display_label,
+                        "raw_confidence": round(float(display_raw_confidence), 4),
+                        "calibrated_confidence": round(float(display_calibrated_confidence), 4),
+                        "display_confidence": round(float(display_calibrated_confidence), 4),
+                        "decision_threshold_source": "calibrated_confidence",
+                        "top3_candidates": [{"label": label, "confidence": round(score, 4)} for label, score in top3_candidates],
+                        "segment_state": auto_engine.state if args.trigger_mode == "auto" else ("SIGNING_ACTIVE" if manual_active else "IDLE_BLANK"),
+                        "segment_status": localize_segment_state(
+                            auto_engine.state if args.trigger_mode == "auto" else (SEGMENT_STATE_ACTIVE if manual_active else SEGMENT_STATE_IDLE),
+                            args.trigger_mode,
+                        ),
+                        "segment_frame_count": len(auto_engine.segment_samples) if args.trigger_mode == "auto" else len(manual_frame_vectors),
+                        "segment_finalize_reason": last_finalize_reason,
+                        "clip_start_sec": "" if last_clip_start_sec is None else round(last_clip_start_sec, 4),
+                        "clip_end_sec": "" if last_clip_end_sec is None else round(last_clip_end_sec, 4),
+                        "finalize_sec": "" if last_finalize_sec is None else round(last_finalize_sec, 4),
+                        "is_blank": latest_analysis.is_blank,
+                        "visible_rest_blank": latest_analysis.visible_rest_blank,
+                        "hidden_rest_blank": latest_analysis.hidden_rest_blank,
+                        "torso_motion_score": round(float(latest_analysis.torso_motion_score), 6),
+                        "hand_motion_score": round(float(latest_analysis.hand_motion_score), 6),
+                        "effective_motion_score": round(float(latest_analysis.effective_motion_score), 6),
+                        "hands_on_knees": latest_analysis.hands_on_knees,
+                        "wrists_detected": latest_analysis.wrists_detected,
+                        "torso_valid": latest_analysis.torso_valid,
+                        "explicit_hands_detected": latest_analysis.explicit_hands_detected,
+                        "wrist_source_left": latest_analysis.wrist_source_left,
+                        "wrist_source_right": latest_analysis.wrist_source_right,
+                        "temporal_active_probability": "" if latest_analysis.temporal_active_probability is None else round(float(latest_analysis.temporal_active_probability), 6),
+                        "emitted_count": len(emitted_labels),
+                    }
+                )
 
             now_tick = cv2.getTickCount()
             elapsed = (now_tick - last_tick) / cv2.getTickFrequency()
@@ -620,13 +873,62 @@ def main() -> None:
                 auto_engine.state if args.trigger_mode == "auto" else (SEGMENT_STATE_ACTIVE if manual_active else SEGMENT_STATE_IDLE),
                 args.trigger_mode,
             )
+            if team_workflow is not None:
+                overlay = draw_team_test_overlay(overlay, team_workflow)
             cv2.imshow(window_name, overlay)
             key = cv2.waitKeyEx(1)
             if key in {27, ord("q"), ord("Q")}:
                 break
+            if team_workflow is not None:
+                if key in {13, 10}:
+                    confirmed = team_workflow.press_enter()
+                    if team_workflow.phase == TEAM_PHASE_ARMED:
+                        team_detection_start_frame = frame_index + max(
+                            1, int(round(source_fps))
+                        )
+                    if confirmed is not None:
+                        export_team_test_reports(team_session)
+                    auto_engine, temporal_predictor = new_auto_trigger()
+                    previous_frame_vector = None
+                    top3_candidates = []
+                    display_label = WAITING_LABEL
+                    display_raw_confidence = 0.0
+                    display_calibrated_confidence = 0.0
+                    last_finalize_reason = ""
+                    last_clip_start_sec = None
+                    last_clip_end_sec = None
+                    last_finalize_sec = None
+                elif key in {ord("r"), ord("R")}:
+                    team_workflow.press_retry()
+                    auto_engine, temporal_predictor = new_auto_trigger()
+                    previous_frame_vector = None
+                    top3_candidates = []
+                    display_label = WAITING_LABEL
+                    display_raw_confidence = 0.0
+                    display_calibrated_confidence = 0.0
+                    last_finalize_reason = ""
+                    last_clip_start_sec = None
+                    last_clip_end_sec = None
+                    last_finalize_sec = None
+                elif (
+                    key in {ord("n"), ord("N")}
+                    and team_workflow.phase == TEAM_PHASE_ARMED
+                    and frame_index >= team_detection_start_frame
+                    and auto_engine.state == SEGMENT_STATE_IDLE
+                ):
+                    team_workflow.press_no_detection()
+                    display_label = NO_DETECTION_LABEL
+                    display_raw_confidence = 0.0
+                    display_calibrated_confidence = 0.0
+                    top3_candidates = []
+                    auto_engine, temporal_predictor = new_auto_trigger()
+                frame_index += 1
+                if args.max_frames > 0 and frame_index >= args.max_frames:
+                    break
+                continue
             if key in {ord("r"), ord("R")}:
                 reset_runtime_state(emitted_labels)
-                auto_engine = AutoTriggerEngine(auto_config)
+                auto_engine, temporal_predictor = new_auto_trigger()
                 manual_active = False
                 manual_frame_vectors = []
                 previous_frame_vector = None
@@ -642,7 +944,7 @@ def main() -> None:
             if file_source_mode and key in {2490368, 2621440}:
                 seek_seconds = 5.0 if key == 2490368 else -5.0
                 if seek_video_capture(cap, seek_seconds):
-                    auto_engine = AutoTriggerEngine(auto_config)
+                    auto_engine, temporal_predictor = new_auto_trigger()
                     manual_active = False
                     manual_frame_vectors = []
                     previous_frame_vector = None
@@ -713,6 +1015,10 @@ def main() -> None:
 
     cap.release()
     cv2.destroyAllWindows()
+
+    if team_session is not None:
+        paths = export_team_test_reports(team_session)
+        print("組員測試結果：", paths.workbook)
 
     if args.save_log:
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
