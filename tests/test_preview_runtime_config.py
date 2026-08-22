@@ -191,7 +191,7 @@ class PreviewRuntimeConfigTests(unittest.TestCase):
         self.assertFalse(config.hidden_rest_enabled)
         self.assertEqual(config.end_hold_sec, 0.50)
 
-    def test_auto_config_uses_best_config_from_model_bundle_when_present(self):
+    def test_auto_config_keeps_locked_repo_config_when_legacy_bundle_config_is_present(self):
         from recognition.realtime.realtime_infer_daily30_sentence import (
             build_auto_trigger_config,
             parse_args,
@@ -209,8 +209,8 @@ class PreviewRuntimeConfigTests(unittest.TestCase):
             )
             config = build_auto_trigger_config(args)
 
-        self.assertEqual(config.end_hold_sec, 0.60)
-        self.assertEqual(config.end_rest_vote_ratio, 0.90)
+        self.assertEqual(config.end_hold_sec, 0.50)
+        self.assertEqual(config.end_rest_vote_ratio, 0.80)
 
     @staticmethod
     def _write_bundle(cache_dir: Path) -> None:
