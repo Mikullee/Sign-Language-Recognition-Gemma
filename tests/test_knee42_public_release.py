@@ -8,7 +8,9 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
+from xml.etree import ElementTree
 
 import torch
 
@@ -70,6 +72,65 @@ class PublishedExampleTests(unittest.TestCase):
         )
         self.assertIsNotNone(match)
         self.assertTrue((ROOT / match.group(1)).is_file(), match.group(1))
+
+    def test_live_check_workbook_is_sanitized_original_export(self):
+        workbook_path = ROOT / "docs" / "evaluation" / "live_check_42.xlsx"
+        with zipfile.ZipFile(workbook_path) as archive:
+            names = archive.namelist()
+            workbook = ElementTree.fromstring(archive.read("xl/workbook.xml"))
+            workbook_rels = ElementTree.fromstring(
+                archive.read("xl/_rels/workbook.xml.rels")
+            )
+            styles = ElementTree.fromstring(archive.read("xl/styles.xml"))
+            sheet = ElementTree.fromstring(archive.read("xl/worksheets/sheet1.xml"))
+            shared_strings = ElementTree.fromstring(archive.read("xl/sharedStrings.xml"))
+
+        namespace = {"x": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+        sheet_names = [
+            sheet.attrib["name"]
+            for sheet in workbook.findall("x:sheets/x:sheet", namespace)
+        ]
+        self.assertEqual(sheet_names, ["組員紀錄", "填寫說明"])
+        forbidden_prefixes = (
+            "xl/persons/",
+            "xl/comments",
+            "xl/threadedComments/",
+            "xl/externalLinks/",
+        )
+        self.assertFalse(any(name.startswith(forbidden_prefixes) for name in names))
+        self.assertNotIn("xl/vbaProject.bin", names)
+        self.assertFalse(
+            any(
+                relationship.attrib.get("Type", "").endswith("/person")
+                for relationship in workbook_rels
+            )
+        )
+
+        strings = {
+            text.text
+            for text in shared_strings.findall(".//x:t", namespace)
+            if text.text is not None
+        }
+        expected_labels = {f"K42_{index:02d}" for index in range(1, 43)}
+        self.assertTrue(expected_labels.issubset(strings))
+        formulas = [
+            formula.text
+            for formula in sheet.findall(".//x:f", namespace)
+            if formula.text is not None
+        ]
+        self.assertEqual(len(formulas), 3)
+        self.assertTrue(all(formula.startswith("COUNTIF(") for formula in formulas))
+
+        table_style_names = {
+            style.attrib["name"]
+            for style in styles.findall("x:tableStyles/x:tableStyle", namespace)
+        }
+        self.assertIn("組員紀錄-style", table_style_names)
+        solid_fills = styles.findall(
+            "x:dxfs/x:dxf/x:fill/x:patternFill[@patternType='solid']/x:fgColor",
+            namespace,
+        )
+        self.assertGreaterEqual(len(solid_fills), 2)
 
     def test_training_examples_pass_every_required_keyword(self):
         required = {
