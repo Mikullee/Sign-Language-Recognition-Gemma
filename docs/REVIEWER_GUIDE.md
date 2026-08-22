@@ -77,11 +77,12 @@ repository **不含**任何影片或特徵快取（原因見 [§8.1](../README.m
 ### 環境
 
 ```powershell
-conda env create -f environment.yml
+conda create -n knee42 python=3.10 pip -y
 conda activate knee42
+python -m pip install -r requirements.lock.txt
 ```
 
-版本鎖定於 `requirements.lock.txt`。訓練在 CUDA 環境下進行；推論可用 CPU。
+`requirements.lock.txt` 是目前發布模型的精確套件版本快照。`environment.yml` 僅供快速建立未完全鎖版的基礎環境；如使用該檔，環境名稱為 `slr_runtime`，仍須再安裝 `requirements.lock.txt` 才能對齊版本。訓練在相容的 CUDA 環境下進行；推論可用 CPU。
 
 ### 重現目前發布的模型
 
