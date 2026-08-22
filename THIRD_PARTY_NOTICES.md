@@ -19,13 +19,9 @@ hand_landmarker.task
 pose_landmarker.task
 ```
 
-上述 `.task` 檔為 Google 發布的預訓練模型資產，其散布條款以 Google 官方發布頁與各模型的 model card 為準，與 MediaPipe 原始碼的 Apache 2.0 授權**未必相同**。為避免轉散布問題，本專案改由安裝時自官方來源下載：
+上述 `.task` 檔為 Google 發布的預訓練模型資產，其散布條款以 Google 官方發布頁與各模型的 model card 為準，與 MediaPipe 原始碼的 Apache 2.0 授權**未必相同**。為避免轉散布問題，Google 官方資產另行提供，不屬於本 repository 或本次 Release；如有需要請聯絡專案維護者取得說明。
 
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\download_knee42_assets.ps1
-```
-
-下載後由 `model/integrity_manifest.sha256` 驗證雜湊，確保取得的檔案與開發時一致。
+取得後由 `model/integrity_manifest.sha256` 驗證雜湊，確保檔案與開發時一致。
 
 ## 字型
 
