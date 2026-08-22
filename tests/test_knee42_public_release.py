@@ -62,6 +62,15 @@ class PublicTrainingPolicyTests(unittest.TestCase):
 
 
 class PublishedExampleTests(unittest.TestCase):
+    def test_live_check_workbook_link_target_exists(self):
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        match = re.search(
+            r"\[`docs/evaluation/live_check_42\.xlsx`\]\(([^)]+)\)",
+            readme,
+        )
+        self.assertIsNotNone(match)
+        self.assertTrue((ROOT / match.group(1)).is_file(), match.group(1))
+
     def test_training_examples_pass_every_required_keyword(self):
         required = {
             name
