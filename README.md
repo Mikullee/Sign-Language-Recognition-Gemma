@@ -26,7 +26,7 @@
    · [一段 → 64×438](#34-步驟三一整段--64--438)
    · [為什麼是 64](#35-為什麼是-64)
    · [訓練 vs 即時](#36-訓練路徑與即時路徑的差異)
-4. [快速試用](#4-快速試用)
+4. [公開模型](#4-公開模型)
 5. [重現訓練環境](#5-重現訓練環境)
 6. [如何製作：開發歷程與主要困難](#6-如何製作開發歷程與主要困難)
 7. [參考文獻](#7-參考文獻)
@@ -35,7 +35,7 @@
 ---
 
 > **審閱者／教授請先看** → [`docs/REVIEWER_GUIDE.md`](docs/REVIEWER_GUIDE.md)
-> 該文件把「看懂 → 試用 → 自己重訓」排成一條可依序執行的路徑，並說明非公開資料的取得與放置方式。
+> 該文件把「看懂 → 核對模型 → 自己重訓」排成一條可依序執行的路徑，並說明非公開資料的取得與放置方式。
 
 ## 1. 這是什麼
 
@@ -372,25 +372,24 @@ return np.concatenate((standardized, sampled_mask.astype(np.float32)), axis=1)
 
 ---
 
-## 4. 快速試用
+## 4. 公開模型
 
-### 4.1 下載
+### 4.1 Release 附件
 
 自 [Releases](../../releases) 取得 `v1.0.0-v13`：
 
 | 檔案 | 內容 | 大小 |
 |---|---|---|
-| `Knee42-IVCAM-v13.zip` | Windows 可攜包，解壓即可執行 | ~13.6 MB |
-| `knee42-model-v11.zip` | 模型 bundle（權重、label map、standardizer、feature config） | ~3 MB |
-| `SHA256SUMS.txt` | 全部檔案的 SHA-256 | — |
+| `knee42-model-v11.zip` | 研究模型 bundle（權重、label map、standardizer、feature config、中文顯示對照） | ~3 MB |
+| `SHA256SUMS.txt` | Release 附件的 SHA-256 | — |
 
 先驗證完整性：
 
 ```powershell
-Get-FileHash .\Knee42-IVCAM-v13.zip -Algorithm SHA256
+Get-FileHash .\knee42-model-v11.zip -Algorithm SHA256
 ```
 
-模型權重的雜湊（程式啟動時亦會自行驗證）：
+bundle 內各檔案的固定雜湊：
 
 ```text
 best_model.pt                 8e35adedae1a03ad5644872769821d2966bb7613b5a1e070996929c7e5f2e492
@@ -400,55 +399,15 @@ feature_config.json           c9670b77a6ab44d766559497e6dbf61a8da9ebfeca45e4b77c
 display_text_map.json         a2d2e008cf6232b29ee04596e1e1bb418ccf0b0587f41e42471cf22e3b2073a3
 ```
 
-### 4.2 無相機自我測試（建議先做這一步）
+### 4.2 公開範圍
 
-不需要任何攝影機硬體，即可確認模型載入、前處理與推論管線完全正常：
+這次公開的是**模型與方法**，不是可直接啟動的 Windows 應用程式。repository 另提供 v13 的訓練、評估、前處理與即時推論原始碼，供審閱方法與重現研究使用；但公開 Release 不含下列項目：
 
-```powershell
-py -3.10 -m venv .venv
-.venv\Scripts\python.exe -m pip install -r requirements-windows.txt
-.venv\Scripts\python.exe -m recognition.realtime.knee42_ivcam --bundle model --self-test --headless --device cpu
-```
+- 原始人物影片與逐筆 `.npz/.npy` 特徵快取
+- MediaPipe 的 `hand_landmarker.task`、`pose_landmarker.task`
+- 完整 Windows 可攜包與私有 runtime attestation
 
-預期輸出應包含 `integrity_verified=true`、前處理張量 `(64, 438)`、logits `(1, 42)`，且不會開啟相機。
-
-### 4.3 用相機試用
-
-```powershell
-start_ivcam.cmd
-```
-
-若自動偵測選錯相機，加上 `--camera-index N`。開始前確保頭部、上半身、雙手與膝蓋都在畫面內，雙手置於自然休息位置；做完一句後回到相同位置，等狀態回到 `WAITING`。
-
-| 按鍵 | 功能 |
-|---|---|
-| `S` | 開始／停止整場切段紀錄 |
-| `M` | AUTO／Manual 切換 |
-| `Space` | Manual 模式下開始／停止單段錄製 |
-| `R` | 清除結果並重設狀態 |
-| `F` | 全螢幕切換 |
-| `Q` / `Esc` | 離開 |
-
-### 4.4 用影片試用（沒有相機時）
-
-```powershell
-start_ivcam.cmd --video "C:\path\to\clip.mp4"
-```
-
-影片會明確套用 container rotation metadata、不自動水平翻轉，並使用與相機完全相同的 MediaPipe、219+219、正規化、standardizer 與 64 幀推論路徑。
-
-### 4.5 錄影輸出
-
-```text
-recordings/Knee42-session-YYYYMMDD-HHMMSS/
-├── session_source.mp4      # 完整原始錄影
-├── session_summary.json    # FPS、掉幀、分段政策等
-├── segments.csv            # 每段時間、Top-1、Top-3、信心分數
-├── segments.jsonl
-├── segments/               # 實際送入辨識的切片
-├── context/                # 前後保留額外時間的除錯影片
-└── metadata/               # raw frame IDs、時間戳與效能證據
-```
+因此 `knee42-model-v11.zip` **不是獨立可執行程式**。若教授需要實際重訓，請依 §5 私下取得匿名化 manifest 與特徵快取；若需要即時硬體展示，請聯絡專案維護者另行取得必要資產與操作說明。
 
 ---
 
@@ -464,7 +423,7 @@ conda activate knee42
 python -m pip install -r requirements.lock.txt
 ```
 
-`requirements.lock.txt` 是目前發布模型的 Linux／CUDA 精確套件版本快照，不適用於 Windows 推論環境。`environment.yml` 僅供快速建立未完全鎖版的基礎環境；如使用該檔，環境名稱為 `slr_runtime`，仍須再安裝 `requirements.lock.txt` 才能對齊訓練版本。Windows／CPU 推論請依 §4.2 安裝 `requirements-windows.txt`。
+`requirements.lock.txt` 是目前發布模型的 Linux／CUDA 精確套件版本快照，不適用於 Windows 推論環境。`environment.yml` 僅供快速建立未完全鎖版的基礎環境；如使用該檔，環境名稱為 `slr_runtime`，仍須再安裝 `requirements.lock.txt` 才能對齊訓練版本。`requirements-windows.txt` 僅記錄來源層級推論所需套件；公開 Release 不含完整即時執行資產。
 
 ### 5.2 資料取得
 

@@ -6,13 +6,13 @@
 |---|---|---|---|
 | MediaPipe | Pose 與 Hand 關鍵點抽取 | Apache License 2.0 | https://github.com/google-ai-edge/mediapipe |
 | PyTorch | BiGRU 模型訓練與推論 | BSD-3-Clause | https://github.com/pytorch/pytorch |
-| OpenCV (`opencv-python`) | 影像擷取、旋轉 metadata 處理、錄影 | Apache License 2.0（OpenCV 4.5.0 起；更早版本為 BSD-3-Clause） | https://github.com/opencv/opencv |
+| OpenCV (`opencv-contrib-python`) | 影像擷取、旋轉 metadata 處理、錄影 | Apache License 2.0（OpenCV 4.5.0 起；更早版本為 BSD-3-Clause） | https://github.com/opencv/opencv |
 | NumPy | 陣列運算與特徵處理 | BSD-3-Clause | https://github.com/numpy/numpy |
 | Pillow | 介面中文字繪製 | MIT-CMU (HPND) | https://github.com/python-pillow/Pillow |
 
 ## MediaPipe 模型檔（重要）
 
-本專案的 Windows 套件與 repository **均不隨附** MediaPipe 的模型檔：
+本次公開 Release 與 repository **均不隨附** MediaPipe 的模型檔：
 
 ```text
 hand_landmarker.task

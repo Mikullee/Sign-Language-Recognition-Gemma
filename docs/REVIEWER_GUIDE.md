@@ -1,6 +1,6 @@
 # 審閱者指引
 
-給指導教授與外部審閱者。這份文件的用途是把「看懂 → 試用 → 自己重訓」排成一條可依序執行的路徑。
+給指導教授與外部審閱者。這份文件的用途是把「看懂 → 核對模型 → 自己重訓」排成一條可依序執行的路徑。
 
 專案主文件為 [README.md](../README.md)；本檔只負責排序與補上**不公開資料的取得與放置方式**。
 
@@ -27,35 +27,20 @@
 
 ---
 
-## 第二部分：試用（約 15 分鐘）
+## 第二部分：核對公開模型（約 10 分鐘）
 
-### 沒有攝影機也可以驗證
+從 GitHub Release `v1.0.0-v13` 下載：
 
-建議先做這一步，它不需要任何硬體，就能確認模型載入、前處理與推論管線完全正常：
+- `knee42-model-v11.zip`：權重、label map、standardizer、feature config 與中文顯示對照
+- `SHA256SUMS.txt`：Release 附件雜湊
 
-```powershell
-py -3.10 -m venv .venv
-.venv\Scripts\python.exe -m pip install -r requirements-windows.txt
-.venv\Scripts\python.exe -m recognition.realtime.knee42_ivcam --bundle model --self-test --headless --device cpu
-```
-
-預期看到 `integrity_verified=true`、前處理張量 `(64, 438)`、logits `(1, 42)`，且不會開啟相機。
-
-### 有攝影機
+先核對附件完整性：
 
 ```powershell
-start_ivcam.cmd
+Get-FileHash .\knee42-model-v11.zip -Algorithm SHA256
 ```
 
-操作方式與 42 類清單見 [§4.3](../README.md#43-用相機試用)。開始前確保頭部、上半身、雙手與膝蓋都在畫面內，雙手置於自然休息位置。
-
-### 用影片
-
-```powershell
-start_ivcam.cmd --video "C:\path\to\clip.mp4"
-```
-
-與相機走完全相同的推論路徑。
+本次公開範圍是**模型與訓練／推論方法**，不包含 Windows 可攜包、MediaPipe `.task` 或人物影片。模型 bundle 不是獨立可執行應用程式；如需即時硬體展示，請聯絡專案維護者另行取得必要資產與說明。
 
 ---
 
@@ -63,7 +48,7 @@ start_ivcam.cmd --video "C:\path\to\clip.mp4"
 
 ### 需要另外取得的兩份資料
 
-repository **不含**任何影片或特徵快取（原因見 [§8.1](../README.md#81-不公開的內容)：訓練資料為專案成員錄製的手語影像，涉及個人肖像）。重訓需要下列兩項，由專案維護者另行提供：
+repository **不含**任何影片或逐筆特徵快取（原因見 [§8.1](../README.md#81-不公開的內容)：訓練資料源自專案成員錄製的手語影像）。重訓需要下列兩項，由專案維護者透過私人管道另行提供：
 
 | 項目 | 放置位置 | 內容 |
 |---|---|---|
@@ -72,7 +57,7 @@ repository **不含**任何影片或特徵快取（原因見 [§8.1](../README.m
 
 **放進這兩個位置之後就不需要任何其他設定。** 訓練端完全不讀原始影片——影片只在特徵抽取階段使用一次，該階段已完成。
 
-規格見 [`schema/manifest_schema.md`](schema/manifest_schema.md) 與 [`schema/feature_schema.md`](schema/feature_schema.md)。特徵快取檔內附有自我檢查腳本，建議放好之後先跑一次確認完整。
+規格見 [`schema/manifest_schema.md`](schema/manifest_schema.md) 與 [`schema/feature_schema.md`](schema/feature_schema.md)。放置完成後，執行 `scripts/verify_knee42_features_final.py` 檢查完整性。
 
 ### 環境
 
@@ -84,7 +69,7 @@ conda activate knee42
 python -m pip install -r requirements.lock.txt
 ```
 
-`requirements.lock.txt` 是目前發布模型的 Linux／CUDA 精確套件版本快照，不適用於 Windows 推論環境。`environment.yml` 僅供快速建立未完全鎖版的基礎環境；如使用該檔，環境名稱為 `slr_runtime`，仍須再安裝 `requirements.lock.txt` 才能對齊訓練版本。Windows／CPU 推論請依 README §4.2 安裝 `requirements-windows.txt`。
+`requirements.lock.txt` 是目前發布模型的 Linux／CUDA 精確套件版本快照，不適用於 Windows 推論環境。`environment.yml` 僅供快速建立未完全鎖版的基礎環境；如使用該檔，環境名稱為 `slr_runtime`，仍須再安裝 `requirements.lock.txt` 才能對齊訓練版本。`requirements-windows.txt` 僅記錄來源層級推論所需套件；公開 Release 不含完整即時執行資產。
 
 ### 重現目前發布的模型
 
