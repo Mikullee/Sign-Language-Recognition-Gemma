@@ -389,6 +389,8 @@ return np.concatenate((standardized, sampled_mask.astype(np.float32)), axis=1)
 Get-FileHash .\knee42-model-v11.zip -Algorithm SHA256
 ```
 
+本次附件的 SHA-256 應為 `af45a4a50fc67755dd86be1b47fe975120e47a1b9f6850232e294685dd4ac8df`。
+
 bundle 內各檔案的固定雜湊：
 
 ```text
