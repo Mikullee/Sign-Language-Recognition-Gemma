@@ -456,13 +456,15 @@ recordings/Knee42-session-YYYYMMDD-HHMMSS/
 
 ### 5.1 環境
 
-```powershell
+重現訓練需使用相容的 **Linux／CUDA** 主機：
+
+```bash
 conda create -n knee42 python=3.10 pip -y
 conda activate knee42
 python -m pip install -r requirements.lock.txt
 ```
 
-`requirements.lock.txt` 是目前發布模型的精確套件版本快照。`environment.yml` 僅供快速建立未完全鎖版的基礎環境；如使用該檔，環境名稱為 `slr_runtime`，仍須再安裝 `requirements.lock.txt` 才能對齊版本。訓練在相容的 CUDA 環境下進行；推論可用 CPU。
+`requirements.lock.txt` 是目前發布模型的 Linux／CUDA 精確套件版本快照，不適用於 Windows 推論環境。`environment.yml` 僅供快速建立未完全鎖版的基礎環境；如使用該檔，環境名稱為 `slr_runtime`，仍須再安裝 `requirements.lock.txt` 才能對齊訓練版本。Windows／CPU 推論請依 §4.2 安裝 `requirements-windows.txt`。
 
 ### 5.2 資料取得
 
