@@ -1,0 +1,21 @@
+{
+  "start_motion_threshold": 0.015,
+  "blank_motion_threshold": 0.03,
+  "start_hold_sec": 0.13,
+  "end_hold_sec": 0.5,
+  "end_rest_vote_ratio": 0.8,
+  "pre_roll_sec": 0.1,
+  "max_segment_sec": 12.0,
+  "min_segment_sec": 0.8,
+  "cooldown_sec": 0.67,
+  "torso_motion_weight": 0.35,
+  "hidden_rest_enabled": false,
+  "knee_lateral_thigh_margin_ratio": 0.55,
+  "knee_min_thigh_progress_ratio": -0.75,
+  "knee_max_thigh_progress_ratio": 1.25,
+  "reference_rest_enabled": true,
+  "reference_seed_sec": 1.0,
+  "reference_seed_motion_threshold": 0.035,
+  "reference_rest_distance_threshold": 0.18,
+  "pose_visibility_threshold": 0.35
+}

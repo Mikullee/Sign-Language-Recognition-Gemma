@@ -14,7 +14,6 @@ from typing import Callable, Iterable
 import cv2
 import mediapipe as mp
 import numpy as np
-import torch
 
 from mediapipe.tasks.python.core.base_options import BaseOptions
 from mediapipe.tasks.python.vision.core.vision_task_running_mode import VisionTaskRunningMode
@@ -22,18 +21,7 @@ from mediapipe.tasks.python.vision.hand_landmarker import HandLandmarker, HandLa
 from mediapipe.tasks.python.vision.pose_landmarker import PoseLandmarker, PoseLandmarkerOptions
 
 from recognition.config import preview_paths
-from recognition.inference.daily30_sentence_feature_utils import build_feature_sequence
-from recognition.inference.daily30_sentence_model_utils import BiGRUSentenceClassifier
-from recognition.inference.daily30_sentence_realtime_utils import (
-    DEFAULT_CACHE_DIR,
-    ensure_artifacts_cached,
-    load_runtime_bundle,
-)
-from recognition.inference.extract_daily30_sentence_features import (
-    extract_frame_vector,
-    normalize_relative_frames,
-    resize_seq,
-)
+from recognition.inference.extract_daily30_sentence_features import extract_frame_vector
 from recognition.realtime.auto_trigger import (
     AutoTriggerConfig,
     AutoTriggerEngine,
@@ -41,20 +29,23 @@ from recognition.realtime.auto_trigger import (
     analyze_frame_vector,
     load_auto_trigger_config,
 )
+from recognition.realtime.personal_temporal import PersonalTemporalModel, PersonalTemporalPredictor, with_temporal_probability
 
 
 PATHS = preview_paths()
+DEFAULT_CACHE_DIR = Path("artifacts") / "realtime" / "best_current"
 DEFAULT_END_SEARCH_GRID = {
-    "end_hold_sec": [0.40, 0.50, 0.60],
+    "end_hold_sec": [0.25, 0.35, 0.50],
     "end_rest_vote_ratio": [0.75, 0.80, 0.90],
-    "blank_motion_threshold": [0.014, 0.018, 0.022],
-    "side_margin_ratio": [0.14, 0.18, 0.22],
-    "chest_drop_ratio": [0.24, 0.28, 0.32],
+    "blank_motion_threshold": [0.018, 0.024, 0.030],
+    "knee_lateral_thigh_margin_ratio": [0.55, 0.80, 1.05],
+    "knee_min_thigh_progress_ratio": [-1.25, -1.00, -0.75],
+    "reference_rest_distance_threshold": [0.18, 0.28, 0.38],
 }
 DEFAULT_START_SEARCH_GRID = {
-    "start_motion_threshold": [0.032, 0.040, 0.048],
-    "start_hold_sec": [0.13, 0.20, 0.27],
-    "pre_roll_sec": [0.15, 0.20, 0.25],
+    "start_motion_threshold": [0.015, 0.024, 0.032],
+    "start_hold_sec": [0.07, 0.13, 0.20],
+    "pre_roll_sec": [0.10, 0.18, 0.25],
 }
 
 
@@ -174,7 +165,10 @@ class VideoBoundaryMetrics:
 
     def to_row(self) -> dict[str, object]:
         return {
-            "video_path": str(self.video_path),
+            # Reports may leave the private processing host.  A filename is
+            # sufficient to identify these fixed benchmark clips and avoids
+            # exporting an account-specific absolute path.
+            "video_path": self.video_path.name,
             "expected_label": self.expected_label,
             "gt_start_sec": self.gt_start_sec,
             "gt_end_sec": self.gt_end_sec,
@@ -248,7 +242,7 @@ class ClassificationComparison:
 
     def to_row(self) -> dict[str, object]:
         payload = asdict(self)
-        payload["video_path"] = str(self.video_path)
+        payload["video_path"] = self.video_path.name
         return payload
 
 
@@ -289,12 +283,19 @@ def load_annotations(csv_path: str | Path) -> list[VideoAnnotation]:
 def detect_cached_segments(
     cache: VideoLandmarkCache,
     config: AutoTriggerConfig,
+    temporal_model: PersonalTemporalModel | None = None,
 ) -> list[SegmentResult]:
     engine = AutoTriggerEngine(config)
+    temporal_predictor = PersonalTemporalPredictor(temporal_model, config) if temporal_model is not None else None
     segments: list[SegmentResult] = []
     previous: np.ndarray | None = None
     for timestamp_sec, frame_vector in zip(cache.timestamps_sec, cache.frame_vectors):
         analysis = analyze_frame_vector(previous, frame_vector, config)
+        if temporal_predictor is not None:
+            analysis = with_temporal_probability(
+                analysis,
+                temporal_predictor.update(float(timestamp_sec), analysis),
+            )
         event = engine.update(frame_vector, analysis, float(timestamp_sec))
         if event is not None:
             segments.append(event)
@@ -322,13 +323,14 @@ def evaluate_candidate(
     caches: dict[Path, VideoLandmarkCache],
     config: AutoTriggerConfig,
     tolerance_sec: float,
+    temporal_model: PersonalTemporalModel | None = None,
 ) -> CandidateEvaluation:
     return CandidateEvaluation(
         config=config,
         per_video=[
             evaluate_video_boundaries(
                 annotation,
-                detect_cached_segments(caches[annotation.video_path], config),
+                detect_cached_segments(caches[annotation.video_path], config, temporal_model),
                 tolerance_sec=tolerance_sec,
             )
             for annotation in annotations
@@ -563,6 +565,16 @@ def classify_manual_and_auto_crops(
 def build_sentence_predictor(
     model_cache_dir: str | Path,
 ) -> Callable[[list[np.ndarray]], tuple[str, float]]:
+    import torch
+
+    from recognition.inference.daily30_sentence_feature_utils import build_feature_sequence
+    from recognition.inference.daily30_sentence_model_utils import BiGRUSentenceClassifier
+    from recognition.inference.daily30_sentence_realtime_utils import (
+        ensure_artifacts_cached,
+        load_runtime_bundle,
+    )
+    from recognition.inference.extract_daily30_sentence_features import normalize_relative_frames, resize_seq
+
     cache_dir = ensure_artifacts_cached(Path(model_cache_dir))
     bundle = load_runtime_bundle(cache_dir)
     preferred_device = str(bundle.get("device", "auto")).lower()

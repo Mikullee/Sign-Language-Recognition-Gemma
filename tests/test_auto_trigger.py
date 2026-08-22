@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -31,7 +32,8 @@ def analysis(
         torso_motion_score=motion,
         hand_motion_score=motion,
         effective_motion_score=motion,
-        hands_at_sides=rest,
+        hands_on_knees=rest,
+        knee_landmarks_valid=True,
         wrists_detected=wrists_visible,
         torso_valid=True,
         explicit_hands_detected=hands_detected,
@@ -47,7 +49,7 @@ def frame(value: float) -> np.ndarray:
 def body_frame(
     *,
     hands_visible: bool = True,
-    hands_at_sides: bool = True,
+    hands_on_knees: bool = True,
     unmirrored_orientation: bool = False,
     wrist_y: float | None = None,
 ) -> np.ndarray:
@@ -58,11 +60,13 @@ def body_frame(
     pose[14] = [0.64, 0.48, 0.0]
     pose[23] = [0.44, 0.70, 0.0]
     pose[24] = [0.56, 0.70, 0.0]
-    left_side_x = 0.70 if unmirrored_orientation else 0.30
-    right_side_x = 0.30 if unmirrored_orientation else 0.70
-    side_y = 0.78 if wrist_y is None else wrist_y
-    pose[15] = [left_side_x, side_y, 0.0] if hands_at_sides else [0.53 if unmirrored_orientation else 0.47, 0.42, 0.0]
-    pose[16] = [right_side_x, side_y, 0.0] if hands_at_sides else [0.47 if unmirrored_orientation else 0.53, 0.42, 0.0]
+    pose[25] = [0.36, 0.90, 0.0]
+    pose[26] = [0.64, 0.90, 0.0]
+    left_knee_x = 0.64 if unmirrored_orientation else 0.36
+    right_knee_x = 0.36 if unmirrored_orientation else 0.64
+    knee_y = 0.90 if wrist_y is None else wrist_y
+    pose[15] = [left_knee_x, knee_y, 0.0] if hands_on_knees else [0.53 if unmirrored_orientation else 0.47, 0.42, 0.0]
+    pose[16] = [right_knee_x, knee_y, 0.0] if hands_on_knees else [0.47 if unmirrored_orientation else 0.53, 0.42, 0.0]
     left = np.zeros((21, 3), dtype=np.float32)
     right = np.zeros((21, 3), dtype=np.float32)
     if hands_visible:
@@ -81,6 +85,92 @@ def activate(engine: AutoTriggerEngine, start_time: float = 0.0, dt: float = 0.1
 
 
 class AutoTriggerEngineTests(unittest.TestCase):
+    def test_six_tenths_preroll_preserves_slow_onset_before_threshold_hold(self):
+        engine = AutoTriggerEngine(
+            AutoTriggerConfig(
+                start_motion_threshold=0.04,
+                start_hold_sec=0.10,
+                pre_roll_sec=0.60,
+                end_hold_sec=0.30,
+            )
+        )
+
+        for timestamp, motion in [
+            (0.0, 0.0),
+            (0.1, 0.01),
+            (0.2, 0.02),
+            (0.3, 0.03),
+            (0.4, 0.05),
+            (0.5, 0.05),
+        ]:
+            engine.update(
+                frame(timestamp),
+                analysis(rest=timestamp == 0.0, motion=motion),
+                timestamp,
+            )
+
+        self.assertEqual(engine.state, SEGMENT_STATE_ACTIVE)
+        self.assertAlmostEqual(engine.clip_start_sec, 0.0, places=6)
+
+    def test_confirmed_rest_trims_to_low_motion_anchor_plus_safety_tail(self):
+        engine = AutoTriggerEngine(
+            AutoTriggerConfig(
+                start_hold_sec=0.10,
+                pre_roll_sec=0.10,
+                end_hold_sec=0.30,
+                end_rest_vote_ratio=1.0,
+                end_safety_tail_sec=0.15,
+            )
+        )
+        now = activate(engine, dt=0.1)
+        low_motion_start = now + 0.1
+        for _ in range(7):
+            now += 0.1
+            self.assertIsNone(
+                engine.update(frame(now), analysis(rest=False, motion=0.001), now)
+            )
+        rest_detected = now + 0.1
+        event = None
+        while event is None:
+            now += 0.1
+            event = engine.update(frame(now), analysis(rest=True, motion=0.0), now)
+
+        self.assertAlmostEqual(event.clip_end_sec, low_motion_start + 0.15, places=6)
+        self.assertAlmostEqual(event.rest_detected_sec, rest_detected, places=6)
+        self.assertEqual(event.boundary_policy, "low_motion_anchor_v1")
+
+    def test_mid_gesture_pause_is_not_used_as_final_anchor(self):
+        engine = AutoTriggerEngine(
+            AutoTriggerConfig(
+                start_hold_sec=0.10,
+                pre_roll_sec=0.10,
+                end_hold_sec=0.30,
+                end_rest_vote_ratio=1.0,
+                end_safety_tail_sec=0.15,
+            )
+        )
+        now = activate(engine, dt=0.1)
+        for _ in range(3):
+            now += 0.1
+            engine.update(frame(now), analysis(rest=False, motion=0.001), now)
+        for _ in range(2):
+            now += 0.1
+            engine.update(frame(now), analysis(rest=False, motion=0.08), now)
+        final_low_motion_start = now + 0.1
+        for _ in range(2):
+            now += 0.1
+            engine.update(frame(now), analysis(rest=False, motion=0.001), now)
+        event = None
+        while event is None:
+            now += 0.1
+            event = engine.update(frame(now), analysis(rest=True, motion=0.0), now)
+
+        self.assertAlmostEqual(
+            event.clip_end_sec,
+            final_low_motion_start + 0.15,
+            places=6,
+        )
+
     def test_start_requires_hold_and_includes_preroll(self):
         config = AutoTriggerConfig(
             start_hold_sec=0.20,
@@ -244,32 +334,125 @@ class AutoTriggerEngineTests(unittest.TestCase):
         self.assertLessEqual(abs(start_10 - start_20), 0.06)
         self.assertLessEqual(abs(end_10 - end_20), 0.06)
 
+    def test_reference_rest_finalizes_when_pose_knee_geometry_drifts(self):
+        config = AutoTriggerConfig(
+            start_motion_threshold=0.01,
+            start_hold_sec=0.10,
+            pre_roll_sec=0.0,
+            end_hold_sec=0.20,
+            end_rest_vote_ratio=0.75,
+            reference_rest_enabled=True,
+            reference_seed_sec=0.20,
+            reference_rest_distance_threshold=0.01,
+        )
+        engine = AutoTriggerEngine(config)
+        rest_frame = body_frame(hands_visible=True, hands_on_knees=True)
+        moving_frame = body_frame(hands_visible=True, hands_on_knees=False)
+        moving_frame_2 = moving_frame.copy()
+        moving_frame_2[99:] += 0.03
+        previous = None
+        for timestamp in (0.0, 0.1, 0.2):
+            current = analyze_frame_vector(previous, rest_frame, config)
+            engine.update(rest_frame, current, timestamp)
+            previous = rest_frame
+        for timestamp, current_frame in ((0.3, moving_frame), (0.4, moving_frame_2)):
+            current = analyze_frame_vector(previous, current_frame, config)
+            engine.update(current_frame, current, timestamp)
+            previous = current_frame
+        self.assertEqual(engine.state, SEGMENT_STATE_ACTIVE)
+
+        event = None
+        for timestamp in (0.5, 0.6, 0.7, 0.8):
+            observed = analyze_frame_vector(previous, rest_frame, config)
+            reference_only = replace(
+                observed,
+                visible_rest_blank=False,
+                hands_on_knees=False,
+            )
+            event = engine.update(rest_frame, reference_only, timestamp)
+            previous = rest_frame
+
+        self.assertIsNotNone(event)
+        assert event is not None
+        self.assertEqual(event.reason, "reference_rest_finalize")
+
+    def test_reference_rest_uses_pose_wrists_when_hand_landmarks_disappear(self):
+        config = AutoTriggerConfig(
+            start_motion_threshold=0.01,
+            start_hold_sec=0.10,
+            pre_roll_sec=0.0,
+            end_hold_sec=0.20,
+            end_rest_vote_ratio=0.75,
+            knee_geometry_enabled=False,
+            hidden_rest_enabled=False,
+            reference_rest_enabled=True,
+            reference_seed_sec=0.20,
+            reference_rest_distance_threshold=0.02,
+        )
+        engine = AutoTriggerEngine(config)
+        rest_frame = body_frame(hands_visible=True, hands_on_knees=True)
+        moving_frame = body_frame(hands_visible=True, hands_on_knees=False)
+        moving_frame_2 = moving_frame.copy()
+        moving_frame_2[99:] += 0.03
+        pose_only_rest = body_frame(hands_visible=False, hands_on_knees=True)
+        previous = None
+        for timestamp in (0.0, 0.1, 0.2):
+            observed = analyze_frame_vector(previous, rest_frame, config)
+            engine.update(rest_frame, observed, timestamp)
+            previous = rest_frame
+        for timestamp, current_frame in ((0.3, moving_frame), (0.4, moving_frame_2)):
+            observed = analyze_frame_vector(previous, current_frame, config)
+            engine.update(current_frame, observed, timestamp)
+            previous = current_frame
+        self.assertEqual(engine.state, SEGMENT_STATE_ACTIVE)
+
+        event = None
+        for timestamp in (0.5, 0.6, 0.7, 0.8, 0.9):
+            observed = analyze_frame_vector(previous, pose_only_rest, config)
+            event = engine.update(pose_only_rest, observed, timestamp)
+            previous = pose_only_rest
+            if event is not None:
+                break
+
+        self.assertIsNotNone(event)
+        assert event is not None
+        self.assertEqual(event.reason, "reference_rest_finalize")
+
 
 class AutoFrameAnalysisTests(unittest.TestCase):
-    def test_visible_still_hands_at_sides_are_rest(self):
-        current = body_frame(hands_visible=True, hands_at_sides=True)
+    def test_pose_wrist_rest_signature_survives_missing_hand_landmarks(self):
+        current = body_frame(hands_visible=False, hands_on_knees=True)
+
+        result = analyze_frame_vector(current, current, AutoTriggerConfig())
+
+        self.assertIsNone(result.rest_signature)
+        self.assertIsNotNone(result.wrist_rest_signature)
+
+    def test_visible_still_hands_on_knees_are_rest(self):
+        current = body_frame(hands_visible=True, hands_on_knees=True)
 
         result = analyze_frame_vector(current, current, AutoTriggerConfig())
 
         self.assertTrue(result.visible_rest_blank)
         self.assertTrue(result.wrists_detected)
-        self.assertTrue(result.hands_at_sides)
+        self.assertTrue(result.hands_on_knees)
+        self.assertTrue(result.knee_landmarks_valid)
         self.assertEqual(result.explicit_hands_detected, 2)
 
-    def test_unmirrored_handedness_is_still_detected_at_image_sides(self):
+    def test_crossed_handedness_is_still_detected_on_knees(self):
         current = body_frame(
             hands_visible=True,
-            hands_at_sides=True,
+            hands_on_knees=True,
             unmirrored_orientation=True,
         )
 
         result = analyze_frame_vector(current, current, AutoTriggerConfig())
 
         self.assertTrue(result.visible_rest_blank)
-        self.assertTrue(result.hands_at_sides)
+        self.assertTrue(result.hands_on_knees)
 
     def test_missing_hands_are_not_rest_when_hidden_rest_is_disabled(self):
-        current = body_frame(hands_visible=False, hands_at_sides=True)
+        current = body_frame(hands_visible=False, hands_on_knees=True)
 
         result = analyze_frame_vector(current, current, AutoTriggerConfig(hidden_rest_enabled=False))
 
@@ -278,27 +461,36 @@ class AutoFrameAnalysisTests(unittest.TestCase):
         self.assertFalse(result.is_blank)
 
     def test_low_motion_at_chest_is_not_rest(self):
-        current = body_frame(hands_visible=True, hands_at_sides=False)
+        current = body_frame(hands_visible=True, hands_on_knees=False)
 
         result = analyze_frame_vector(current, current, AutoTriggerConfig())
 
         self.assertFalse(result.visible_rest_blank)
-        self.assertFalse(result.hands_at_sides)
+        self.assertFalse(result.hands_on_knees)
 
-    def test_low_motion_at_abdomen_is_not_rest_even_when_wrists_span_sides(self):
+    def test_low_motion_above_knees_is_not_rest(self):
         current = body_frame(
             hands_visible=True,
-            hands_at_sides=True,
-            wrist_y=0.62,
+            hands_on_knees=True,
+            wrist_y=0.50,
         )
 
         result = analyze_frame_vector(current, current, AutoTriggerConfig())
 
         self.assertFalse(result.visible_rest_blank)
-        self.assertFalse(result.hands_at_sides)
+        self.assertFalse(result.hands_on_knees)
+
+    def test_missing_knee_landmarks_cannot_produce_visible_rest(self):
+        current = body_frame(hands_visible=True, hands_on_knees=True)
+        current[25 * 3:27 * 3] = 0.0
+
+        result = analyze_frame_vector(current, current, AutoTriggerConfig())
+
+        self.assertFalse(result.knee_landmarks_valid)
+        self.assertFalse(result.visible_rest_blank)
 
     def test_hand_motion_dominates_effective_motion(self):
-        previous = body_frame(hands_visible=True, hands_at_sides=True)
+        previous = body_frame(hands_visible=True, hands_on_knees=True)
         current = previous.copy()
         current[99:162:3] += 0.10
 
@@ -308,8 +500,8 @@ class AutoFrameAnalysisTests(unittest.TestCase):
         self.assertEqual(result.effective_motion_score, result.hand_motion_score)
 
     def test_pose_arm_motion_survives_missing_hand_landmarks(self):
-        previous = body_frame(hands_visible=False, hands_at_sides=True)
-        current = body_frame(hands_visible=False, hands_at_sides=False)
+        previous = body_frame(hands_visible=False, hands_on_knees=True)
+        current = body_frame(hands_visible=False, hands_on_knees=False)
 
         result = analyze_frame_vector(previous, current, AutoTriggerConfig())
 

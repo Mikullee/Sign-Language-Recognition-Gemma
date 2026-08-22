@@ -9,6 +9,7 @@
 *.npz
 *.ckpt
 *.onnx
+*.task
 __pycache__/
 *.pyc
 *.pyo

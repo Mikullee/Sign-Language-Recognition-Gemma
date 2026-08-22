@@ -1,0 +1,15 @@
+{
+  "source_zip_name": "knee_detector_team_trial_20260814_194922.zip",
+  "source_zip_sha256": "d31da3a2075321304cc595657417bf810eb52ee83ff5057a09aec9a2218f4f3c",
+  "auto_trigger_source_sha256": "0092136a14a859c7a11aa0e5df9d0920a37471e8da09718828eb773d00d6fdc7",
+  "auto_trigger_controller_sha256": "32adf8ddb026a79cb68b8a71b0e60d784d70605c201f772d32ef38d367bcb5b4",
+  "auto_trigger_config_sha256": "d21f64f4f45f343964a532c5525ff5a4ce5669c9dcbc288cc7b65ccdf62ef728",
+  "temporal_model_sha256": "e2bec48438f8085dd4f8207c13376afe50384b9f0a2e081939278922cf81bad8",
+  "knee_geometry_enabled": false,
+  "temporal_classifier_enabled": false,
+  "archived_recognizer_imported": false,
+  "boundary_policy": "low_motion_anchor_v1",
+  "build_commit": "d753d79e8411b1f9276b1f9b3dc65e43acd2030e",
+  "best_model_sha256": "8e35adedae1a03ad5644872769821d2966bb7613b5a1e070996929c7e5f2e492",
+  "selection_ledger_sha256": "9a1016ffa6915f9ef18ca835f32166d71712240e1654dfc92fcd080f67f8a272"
+}
