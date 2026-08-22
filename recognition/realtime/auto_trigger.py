@@ -23,6 +23,8 @@ LEFT_WRIST = 15
 RIGHT_WRIST = 16
 LEFT_HIP = 23
 RIGHT_HIP = 24
+LEFT_KNEE = 25
+RIGHT_KNEE = 26
 
 
 @dataclass(frozen=True)
@@ -32,14 +34,30 @@ class AutoTriggerConfig:
     start_hold_sec: float = 0.20
     end_hold_sec: float = 0.50
     end_rest_vote_ratio: float = 0.80
+    end_safety_tail_sec: float = 0.0
     pre_roll_sec: float = 0.20
     max_segment_sec: float = 9.60
     min_segment_sec: float = 0.80
     cooldown_sec: float = 0.67
     torso_motion_weight: float = 0.35
+    # A camera that ends around the knees can use the learned shoulder/hand
+    # rest signature only, avoiding unstable hip/knee pose estimates.
+    knee_geometry_enabled: bool = True
     hidden_rest_enabled: bool = False
-    side_margin_ratio: float = 0.18
-    chest_drop_ratio: float = 0.28
+    knee_lateral_thigh_margin_ratio: float = 0.55
+    # Seated cameras commonly see the resting palm on the upper thigh while
+    # PoseLandmarker places the knee below it.  Negative progress is therefore
+    # intentionally permitted, but chest-level hands remain outside the band.
+    knee_min_thigh_progress_ratio: float = -0.85
+    knee_max_thigh_progress_ratio: float = 1.25
+    reference_rest_enabled: bool = False
+    reference_seed_sec: float = 1.00
+    reference_seed_motion_threshold: float = 0.035
+    reference_rest_distance_threshold: float = 0.28
+    reference_departure_distance_threshold: float = 0.10
+    temporal_classifier_enabled: bool = False
+    temporal_start_probability_threshold: float = 0.55
+    temporal_rest_probability_threshold: float = 0.55
     pose_visibility_threshold: float = 0.35
 
     def __post_init__(self) -> None:
@@ -49,6 +67,8 @@ class AutoTriggerConfig:
             raise ValueError("Start hold and pre-roll must be non-negative.")
         if self.end_hold_sec <= 0:
             raise ValueError("End hold must be positive.")
+        if self.end_safety_tail_sec < 0:
+            raise ValueError("End safety tail must be non-negative.")
         if not 0 < self.end_rest_vote_ratio <= 1:
             raise ValueError("End rest vote ratio must be in (0, 1].")
         if self.max_segment_sec <= 0 or self.min_segment_sec < 0:
@@ -57,6 +77,21 @@ class AutoTriggerConfig:
             raise ValueError("Maximum segment duration must be at least the minimum duration.")
         if self.cooldown_sec < 0:
             raise ValueError("Cooldown must be non-negative.")
+        if self.knee_lateral_thigh_margin_ratio <= 0:
+            raise ValueError("Knee lateral thigh margin must be positive.")
+        if self.knee_min_thigh_progress_ratio >= self.knee_max_thigh_progress_ratio:
+            raise ValueError("Knee thigh progress range is invalid.")
+        if self.reference_seed_sec < 0 or self.reference_seed_motion_threshold < 0:
+            raise ValueError("Reference seed settings must be non-negative.")
+        if (
+            self.reference_rest_distance_threshold <= 0
+            or self.reference_departure_distance_threshold <= 0
+        ):
+            raise ValueError("Reference pose distance thresholds must be positive.")
+        if not 0 < self.temporal_start_probability_threshold < 1:
+            raise ValueError("Temporal start probability threshold must be in (0, 1).")
+        if not 0 < self.temporal_rest_probability_threshold < 1:
+            raise ValueError("Temporal rest probability threshold must be in (0, 1).")
 
     def to_dict(self) -> dict[str, float | bool]:
         return asdict(self)
@@ -69,16 +104,25 @@ class AutoFrameAnalysis:
     torso_motion_score: float
     hand_motion_score: float
     effective_motion_score: float
-    hands_at_sides: bool
+    hands_on_knees: bool
+    knee_landmarks_valid: bool
     wrists_detected: bool
     torso_valid: bool
     explicit_hands_detected: int
     wrist_source_left: str
     wrist_source_right: str
+    rest_signature: tuple[float, ...] | None = None
+    wrist_rest_signature: tuple[float, ...] | None = None
+    temporal_active_probability: float | None = None
 
     @property
     def is_blank(self) -> bool:
         return bool(self.visible_rest_blank or self.hidden_rest_blank)
+
+    @property
+    def hands_at_sides(self) -> bool:
+        """Backward-compatible name for callers predating seated knee triggering."""
+        return self.hands_on_knees
 
 
 @dataclass(frozen=True)
@@ -94,6 +138,8 @@ class SegmentResult:
     clip_end_sec: float
     finalize_sec: float
     reason: str
+    rest_detected_sec: float | None = None
+    boundary_policy: str = "first_confirmed_rest"
 
     @property
     def frame_vectors(self) -> list[np.ndarray]:
@@ -153,6 +199,100 @@ def _masked_motion(previous_points: np.ndarray, current_points: np.ndarray) -> f
     return float(np.sqrt(np.mean(np.square(diff), dtype=np.float32)))
 
 
+def _hand_center(hand: np.ndarray) -> np.ndarray | None:
+    """Return a robust palm centre while rejecting an all-zero hand landmark set."""
+    valid = hand[np.any(hand != 0, axis=1)]
+    if not len(valid):
+        return None
+    # Palm anchors are stabler than fingertips when a relaxed hand is partially cropped.
+    anchors = valid[: min(len(valid), 18)]
+    return np.median(anchors, axis=0)
+
+
+def _assignment_is_on_knees(
+    wrists: tuple[np.ndarray, np.ndarray],
+    hand_centres: tuple[np.ndarray | None, np.ndarray | None],
+    hips: tuple[np.ndarray, np.ndarray],
+    knees: tuple[np.ndarray, np.ndarray],
+    scale: float,
+    config: AutoTriggerConfig,
+    assignment: tuple[int, int],
+) -> bool:
+    """Check one left/right (or crossed) hand-to-knee association."""
+    for hand_index, knee_index in enumerate(assignment):
+        wrist = wrists[hand_index]
+        hand_centre = hand_centres[hand_index]
+        hip = hips[knee_index]
+        knee = knees[knee_index]
+        thigh = knee[:2] - hip[:2]
+        thigh_sq = float(np.dot(thigh, thigh))
+        if hand_centre is None or thigh_sq <= 1e-8:
+            return False
+        wrist_progress = float(np.dot(wrist[:2] - hip[:2], thigh) / thigh_sq)
+        palm_progress = float(np.dot(hand_centre[:2] - hip[:2], thigh) / thigh_sq)
+        wrist_projection = hip[:2] + wrist_progress * thigh
+        palm_projection = hip[:2] + palm_progress * thigh
+        wrist_lateral = float(np.linalg.norm(wrist[:2] - wrist_projection))
+        palm_lateral = float(np.linalg.norm(hand_centre[:2] - palm_projection))
+        if not (config.knee_min_thigh_progress_ratio <= wrist_progress <= config.knee_max_thigh_progress_ratio):
+            return False
+        if not (config.knee_min_thigh_progress_ratio <= palm_progress <= config.knee_max_thigh_progress_ratio):
+            return False
+        if wrist_lateral > config.knee_lateral_thigh_margin_ratio * scale:
+            return False
+        if palm_lateral > config.knee_lateral_thigh_margin_ratio * scale:
+            return False
+    return True
+
+
+def _rest_signature(
+    left_wrist: np.ndarray | None,
+    right_wrist: np.ndarray | None,
+    left_hand: np.ndarray,
+    right_hand: np.ndarray,
+    left_shoulder: np.ndarray | None,
+    right_shoulder: np.ndarray | None,
+) -> tuple[float, ...] | None:
+    """Encode wrist/palm positions in torso coordinates for seated rest matching."""
+    if any(point is None for point in (left_wrist, right_wrist, left_shoulder, right_shoulder)):
+        return None
+    left_palm = _hand_center(left_hand)
+    right_palm = _hand_center(right_hand)
+    if left_palm is None or right_palm is None:
+        return None
+    assert left_wrist is not None and right_wrist is not None
+    assert left_shoulder is not None and right_shoulder is not None
+    centre = (left_shoulder[:2] + right_shoulder[:2]) / 2.0
+    scale = max(float(np.linalg.norm(left_shoulder[:2] - right_shoulder[:2])), 1e-3)
+    pairs = [(left_wrist[:2], left_palm[:2]), (right_wrist[:2], right_palm[:2])]
+    pairs.sort(key=lambda pair: float(pair[0][0]))
+    values: list[float] = []
+    for wrist, palm in pairs:
+        values.extend(((wrist - centre) / scale).tolist())
+        values.extend(((palm - centre) / scale).tolist())
+    return tuple(float(value) for value in values)
+
+
+def _wrist_rest_signature(
+    left_wrist: np.ndarray | None,
+    right_wrist: np.ndarray | None,
+    left_shoulder: np.ndarray | None,
+    right_shoulder: np.ndarray | None,
+) -> tuple[float, ...] | None:
+    """Encode pose/hand wrists even when explicit palm landmarks disappear."""
+    if any(point is None for point in (left_wrist, right_wrist, left_shoulder, right_shoulder)):
+        return None
+    assert left_wrist is not None and right_wrist is not None
+    assert left_shoulder is not None and right_shoulder is not None
+    centre = (left_shoulder[:2] + right_shoulder[:2]) / 2.0
+    scale = max(float(np.linalg.norm(left_shoulder[:2] - right_shoulder[:2])), 1e-3)
+    wrists = sorted((left_wrist[:2], right_wrist[:2]), key=lambda point: float(point[0]))
+    values: list[float] = []
+    for wrist in wrists:
+        values.extend(((wrist - centre) / scale).tolist())
+    return tuple(float(value) for value in values)
+
+
 def analyze_frame_vector(
     previous_frame_vector: np.ndarray | None,
     current_frame_vector: np.ndarray,
@@ -180,7 +320,10 @@ def analyze_frame_vector(
     right_shoulder = _valid_point(current_pose, RIGHT_SHOULDER)
     left_hip = _valid_point(current_pose, LEFT_HIP)
     right_hip = _valid_point(current_pose, RIGHT_HIP)
+    left_knee = _valid_point(current_pose, LEFT_KNEE)
+    right_knee = _valid_point(current_pose, RIGHT_KNEE)
     torso_valid = all(point is not None for point in (left_shoulder, right_shoulder, left_hip, right_hip))
+    knee_landmarks_valid = all(point is not None for point in (left_knee, right_knee))
     wrists_detected = left_wrist is not None and right_wrist is not None
 
     torso_motion = 0.0
@@ -199,31 +342,36 @@ def analyze_frame_vector(
         hand_motion = max(left_motion, right_motion, pose_arm_motion)
     effective_motion = max(hand_motion, config.torso_motion_weight * torso_motion)
 
-    hands_at_sides = False
-    if torso_valid and wrists_detected:
+    hands_on_knees = False
+    if (
+        config.knee_geometry_enabled
+        and torso_valid
+        and knee_landmarks_valid
+        and wrists_detected
+        and explicit_hands_detected == 2
+    ):
         assert left_shoulder is not None and right_shoulder is not None
         assert left_hip is not None and right_hip is not None
+        assert left_knee is not None and right_knee is not None
         assert left_wrist is not None and right_wrist is not None
-        torso_center_x = float((left_shoulder[0] + right_shoulder[0]) / 2.0)
         shoulder_width = max(float(np.linalg.norm(left_shoulder[:2] - right_shoulder[:2])), 1e-3)
-        shoulder_y = float((left_shoulder[1] + right_shoulder[1]) / 2.0)
-        hip_y = float((left_hip[1] + right_hip[1]) / 2.0)
-        torso_height = max(hip_y - shoulder_y, 1e-3)
-        chest_y = shoulder_y + config.chest_drop_ratio * torso_height
-        side_margin = config.side_margin_ratio * shoulder_width
-        image_left_x = min(float(left_wrist[0]), float(right_wrist[0]))
-        image_right_x = max(float(left_wrist[0]), float(right_wrist[0]))
-        wrist_floor_y = max(chest_y, hip_y)
-        both_wrists_low = left_wrist[1] >= wrist_floor_y and right_wrist[1] >= wrist_floor_y
-        spans_both_sides = (
-            image_left_x <= torso_center_x - side_margin
-            and image_right_x >= torso_center_x + side_margin
+        thigh_lengths = [
+            float(np.linalg.norm(left_knee[:2] - left_hip[:2])),
+            float(np.linalg.norm(right_knee[:2] - right_hip[:2])),
+        ]
+        body_scale = max(shoulder_width, float(np.median(thigh_lengths)), 1e-3)
+        hand_centres = (_hand_center(current_left), _hand_center(current_right))
+        wrists = (left_wrist, right_wrist)
+        hips = (left_hip, right_hip)
+        knees = (left_knee, right_knee)
+        hands_on_knees = (
+            _assignment_is_on_knees(wrists, hand_centres, hips, knees, body_scale, config, (0, 1))
+            or _assignment_is_on_knees(wrists, hand_centres, hips, knees, body_scale, config, (1, 0))
         )
-        hands_at_sides = bool(both_wrists_low and spans_both_sides)
 
     visible_rest_blank = bool(
         explicit_hands_detected == 2
-        and hands_at_sides
+        and hands_on_knees
         and effective_motion <= config.blank_motion_threshold
     )
     hidden_rest_blank = bool(
@@ -232,18 +380,35 @@ def analyze_frame_vector(
         and explicit_hands_detected == 0
         and torso_motion <= config.blank_motion_threshold
     )
+    rest_signature = _rest_signature(
+        left_wrist,
+        right_wrist,
+        current_left,
+        current_right,
+        left_shoulder,
+        right_shoulder,
+    )
+    wrist_rest_signature = _wrist_rest_signature(
+        left_wrist,
+        right_wrist,
+        left_shoulder,
+        right_shoulder,
+    )
     return AutoFrameAnalysis(
         visible_rest_blank=visible_rest_blank,
         hidden_rest_blank=hidden_rest_blank,
         torso_motion_score=torso_motion,
         hand_motion_score=hand_motion,
         effective_motion_score=effective_motion,
-        hands_at_sides=hands_at_sides,
+        hands_on_knees=hands_on_knees,
+        knee_landmarks_valid=knee_landmarks_valid,
         wrists_detected=wrists_detected,
         torso_valid=torso_valid,
         explicit_hands_detected=explicit_hands_detected,
         wrist_source_left=left_source,
         wrist_source_right=right_source,
+        rest_signature=rest_signature,
+        wrist_rest_signature=wrist_rest_signature,
     )
 
 
@@ -255,9 +420,15 @@ class AutoTriggerEngine:
         self.segment_samples: list[FrameSample] = []
         self._pre_roll: deque[FrameSample] = deque()
         self._active_start_sec: float | None = None
+        self._low_motion_start_sec: float | None = None
         self._end_votes: deque[tuple[float, bool]] = deque()
         self._cooldown_until_sec = 0.0
         self._last_timestamp_sec: float | None = None
+        self._reference_seed_start_sec: float | None = None
+        self._reference_signatures: list[np.ndarray] = []
+        self._reference_wrist_signatures: list[np.ndarray] = []
+        self._rest_reference_signature: np.ndarray | None = None
+        self._rest_wrist_reference_signature: np.ndarray | None = None
 
     def reset(self) -> None:
         self.state = SEGMENT_STATE_IDLE
@@ -265,9 +436,15 @@ class AutoTriggerEngine:
         self.segment_samples = []
         self._pre_roll.clear()
         self._active_start_sec = None
+        self._low_motion_start_sec = None
         self._end_votes.clear()
         self._cooldown_until_sec = 0.0
         self._last_timestamp_sec = None
+        self._reference_seed_start_sec = None
+        self._reference_signatures = []
+        self._reference_wrist_signatures = []
+        self._rest_reference_signature = None
+        self._rest_wrist_reference_signature = None
 
     def update(
         self,
@@ -280,6 +457,10 @@ class AutoTriggerEngine:
             raise ValueError("Frame timestamps must be monotonic.")
         self._last_timestamp_sec = timestamp_sec
         sample = FrameSample(timestamp_sec, np.asarray(frame_vector, dtype=np.float32).copy())
+        # Learn the per-video seated waiting pose before allowing an action.
+        # This must run regardless of the state so a transient early movement
+        # cannot prevent the initial reference from ever being completed.
+        self._update_rest_reference(timestamp_sec, analysis)
 
         if self.state == SEGMENT_STATE_COOLDOWN:
             if timestamp_sec < self._cooldown_until_sec:
@@ -287,11 +468,17 @@ class AutoTriggerEngine:
             self.state = SEGMENT_STATE_IDLE
             self.clip_start_sec = None
             self._pre_roll.clear()
+            self._low_motion_start_sec = None
 
         if self.state == SEGMENT_STATE_IDLE:
             return self._update_idle(sample, analysis)
 
         self.segment_samples.append(sample)
+        if analysis.effective_motion_score <= self.config.blank_motion_threshold:
+            if self._low_motion_start_sec is None:
+                self._low_motion_start_sec = timestamp_sec
+        else:
+            self._low_motion_start_sec = None
         if self.clip_start_sec is not None and timestamp_sec - self.clip_start_sec >= self.config.max_segment_sec:
             return self._finalize(timestamp_sec, timestamp_sec, "timeout_finalize")
 
@@ -315,9 +502,31 @@ class AutoTriggerEngine:
         window_elapsed = timestamp_sec - self._end_votes[0][0]
         vote_ratio = sum(1 for _, vote in self._end_votes if vote) / len(self._end_votes)
         if window_elapsed + 1e-9 >= self.config.end_hold_sec and vote_ratio >= self.config.end_rest_vote_ratio:
-            clip_end_sec = next(time_sec for time_sec, vote in self._end_votes if vote)
-            reason = "hidden_rest_finalize" if analysis.hidden_rest_blank and not analysis.visible_rest_blank else "visible_rest_finalize"
-            return self._finalize(clip_end_sec, timestamp_sec, reason)
+            rest_detected_sec = next(time_sec for time_sec, vote in self._end_votes if vote)
+            clip_end_sec = rest_detected_sec
+            boundary_policy = "first_confirmed_rest"
+            if (
+                self.config.end_safety_tail_sec > 0
+                and self._low_motion_start_sec is not None
+            ):
+                clip_end_sec = min(
+                    rest_detected_sec,
+                    self._low_motion_start_sec + self.config.end_safety_tail_sec,
+                )
+                boundary_policy = "low_motion_anchor_v1"
+            if analysis.hidden_rest_blank and not analysis.visible_rest_blank:
+                reason = "hidden_rest_finalize"
+            elif analysis.visible_rest_blank:
+                reason = "visible_rest_finalize"
+            else:
+                reason = "reference_rest_finalize"
+            return self._finalize(
+                clip_end_sec,
+                timestamp_sec,
+                reason,
+                rest_detected_sec=rest_detected_sec,
+                boundary_policy=boundary_policy,
+            )
         return None
 
     def _update_idle(self, sample: FrameSample, analysis: AutoFrameAnalysis) -> None:
@@ -348,26 +557,109 @@ class AutoTriggerEngine:
             self.clip_start_sec = self.segment_samples[0].timestamp_sec
             self.state = SEGMENT_STATE_ACTIVE
             self._active_start_sec = None
+            self._low_motion_start_sec = None
             self._end_votes.clear()
         return None
 
     def _is_start_candidate(self, analysis: AutoFrameAnalysis) -> bool:
-        if self._is_rest_candidate(analysis):
+        if self.config.reference_rest_enabled and self._rest_reference_signature is None:
             return False
-        if analysis.effective_motion_score < self.config.start_motion_threshold:
+        reference_distance = self._reference_distance(analysis)
+        departed_reference_pose = bool(
+            reference_distance is not None
+            and reference_distance >= self.config.reference_departure_distance_threshold
+        )
+        if self._is_rest_candidate(analysis) and not departed_reference_pose:
+            return False
+        if (
+            analysis.effective_motion_score < self.config.start_motion_threshold
+            and not departed_reference_pose
+        ):
+            return False
+        if (
+            self.config.temporal_classifier_enabled
+            and analysis.temporal_active_probability is not None
+            and analysis.temporal_active_probability < self.config.temporal_start_probability_threshold
+        ):
             return False
         return True
 
     def _is_rest_candidate(self, analysis: AutoFrameAnalysis) -> bool:
+        rest = False
         if analysis.visible_rest_blank:
-            return True
-        return bool(self.config.hidden_rest_enabled and analysis.hidden_rest_blank)
+            rest = True
+        elif (
+            self.config.reference_rest_enabled
+            and (distance := self._reference_distance(analysis)) is not None
+            and analysis.effective_motion_score <= self.config.blank_motion_threshold
+        ):
+            if distance <= self.config.reference_rest_distance_threshold:
+                rest = True
+        elif self.config.hidden_rest_enabled and analysis.hidden_rest_blank:
+            rest = True
+        if not rest:
+            return False
+        if (
+            self.config.temporal_classifier_enabled
+            and analysis.temporal_active_probability is not None
+            and 1.0 - analysis.temporal_active_probability < self.config.temporal_rest_probability_threshold
+        ):
+            return False
+        return True
+
+    def _reference_distance(self, analysis: AutoFrameAnalysis) -> float | None:
+        if self._rest_reference_signature is not None and analysis.rest_signature is not None:
+            signature = np.asarray(analysis.rest_signature, dtype=np.float32)
+            return float(np.sqrt(np.mean(np.square(signature - self._rest_reference_signature))))
+        if (
+            self._rest_wrist_reference_signature is not None
+            and analysis.wrist_rest_signature is not None
+        ):
+            signature = np.asarray(analysis.wrist_rest_signature, dtype=np.float32)
+            return float(
+                np.sqrt(
+                    np.mean(np.square(signature - self._rest_wrist_reference_signature))
+                )
+            )
+        return None
+
+    def _update_rest_reference(self, timestamp_sec: float, analysis: AutoFrameAnalysis) -> None:
+        if not self.config.reference_rest_enabled or self._rest_reference_signature is not None:
+            return
+        eligible = bool(
+            analysis.rest_signature is not None
+            and analysis.wrist_rest_signature is not None
+            and analysis.explicit_hands_detected == 2
+            and analysis.effective_motion_score <= self.config.reference_seed_motion_threshold
+        )
+        # Do not start the countdown from camera-open: pose/hand landmarks can
+        # be absent for the first frames while iVCam autofocus settles.
+        if not eligible:
+            if not self._reference_signatures:
+                self._reference_seed_start_sec = None
+            return
+        if self._reference_seed_start_sec is None:
+            self._reference_seed_start_sec = timestamp_sec
+        self._reference_signatures.append(np.asarray(analysis.rest_signature, dtype=np.float32))
+        self._reference_wrist_signatures.append(
+            np.asarray(analysis.wrist_rest_signature, dtype=np.float32)
+        )
+        if timestamp_sec - self._reference_seed_start_sec >= self.config.reference_seed_sec:
+            self._rest_reference_signature = np.median(
+                np.stack(self._reference_signatures), axis=0
+            ).astype(np.float32)
+            self._rest_wrist_reference_signature = np.median(
+                np.stack(self._reference_wrist_signatures), axis=0
+            ).astype(np.float32)
 
     def _finalize(
         self,
         clip_end_sec: float,
         finalize_sec: float,
         reason: str,
+        *,
+        rest_detected_sec: float | None = None,
+        boundary_policy: str | None = None,
     ) -> SegmentResult:
         assert self.clip_start_sec is not None
         selected = [
@@ -388,6 +680,13 @@ class AutoTriggerEngine:
             clip_end_sec=float(clip_end_sec),
             finalize_sec=float(finalize_sec),
             reason=reason,
+            rest_detected_sec=(
+                None if rest_detected_sec is None else float(rest_detected_sec)
+            ),
+            boundary_policy=(
+                boundary_policy
+                or ("timeout" if reason == "timeout_finalize" else "first_confirmed_rest")
+            ),
         )
         self.state = SEGMENT_STATE_COOLDOWN
         self._cooldown_until_sec = finalize_sec + self.config.cooldown_sec
@@ -395,5 +694,6 @@ class AutoTriggerEngine:
         self.segment_samples = []
         self._pre_roll.clear()
         self._active_start_sec = None
+        self._low_motion_start_sec = None
         self._end_votes.clear()
         return result
