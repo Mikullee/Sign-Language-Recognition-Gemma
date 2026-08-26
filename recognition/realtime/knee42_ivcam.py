@@ -24,6 +24,11 @@ from recognition.realtime.knee42_display import (
     render_application_view,
     windows_primary_screen_size,
 )
+from recognition.realtime.knee42_integrity import (
+    IntegrityError,
+    parse_sha256_manifest,
+    sha256_file,
+)
 from recognition.realtime.knee42_session_recording import SegmentSessionRecorder
 from recognition.realtime.knee42_preprocessing import (
     FrameObservation,
@@ -63,18 +68,6 @@ SELECTION_BOUND_FILES = frozenset(
 )
 
 
-class IntegrityError(RuntimeError):
-    pass
-
-
-def sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
 def sha256_canonical_text_file(path: Path) -> str:
     """Hash locked text identically after LF or Windows CRLF checkout."""
     payload = path.read_bytes().replace(b"\r\n", b"\n")
@@ -86,23 +79,7 @@ def verify_integrity_manifest(bundle_dir: Path) -> dict[str, str]:
     manifest = bundle_dir / "integrity_manifest.sha256"
     if not manifest.is_file():
         raise IntegrityError(f"integrity manifest missing: {manifest}")
-    expected: dict[str, str] = {}
-    for line_number, line in enumerate(manifest.read_text(encoding="ascii").splitlines(), 1):
-        if not line.strip():
-            continue
-        parts = line.split(maxsplit=1)
-        if len(parts) != 2 or len(parts[0]) != 64:
-            raise IntegrityError(f"invalid integrity entry at line {line_number}")
-        digest, relative_text = parts[0].lower(), parts[1].strip().lstrip("*")
-        if any(character not in "0123456789abcdef" for character in digest):
-            raise IntegrityError(f"invalid SHA-256 at line {line_number}")
-        relative = Path(relative_text)
-        if relative.is_absolute() or ".." in relative.parts:
-            raise IntegrityError(f"unsafe integrity path: {relative_text}")
-        normalized = relative.as_posix()
-        if normalized in expected:
-            raise IntegrityError(f"duplicate integrity path: {normalized}")
-        expected[normalized] = digest
+    expected = dict(parse_sha256_manifest(manifest))
     missing = sorted(REQUIRED_INTEGRITY_FILES - set(expected))
     if missing:
         raise IntegrityError(f"integrity manifest missing required files: {missing}")

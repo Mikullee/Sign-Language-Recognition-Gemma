@@ -1,0 +1,76 @@
+{
+  "schema_version": 1,
+  "release_version": "v1.0.1-v13.1",
+  "app_version": "v13.1",
+  "model_version": "v11",
+  "label_count": 42,
+  "input_shape": [
+    1,
+    64,
+    438
+  ],
+  "artifact_names": {
+    "source_runtime": "Knee42-v13.1-source-runtime.zip",
+    "windows_x64": "Knee42-v13.1-windows-x64.zip"
+  },
+  "assets": {
+    "model_archive": {
+      "filename": "knee42-model-v11.zip",
+      "url": "https://github.com/Mikullee/Sign-Language-Recognition-Gemma/releases/download/v1.0.0-v13/knee42-model-v11.zip",
+      "sha256": "af45a4a50fc67755dd86be1b47fe975120e47a1b9f6850232e294685dd4ac8df",
+      "license_id": "CC-BY-NC-4.0"
+    },
+    "hand_landmarker_task": {
+      "filename": "hand_landmarker.task",
+      "url": "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",
+      "sha256": "fbc2a30080c3c557093b5ddfc334698132eb341044ccee322ccf8bcf3607cde1",
+      "license_id": "Apache-2.0"
+    },
+    "pose_landmarker_task": {
+      "filename": "pose_landmarker.task",
+      "url": "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task",
+      "sha256": "59929e1d1ee95287735ddd833b19cf4ac46d29bc7afddbbf6753c459690d574a",
+      "license_id": "Apache-2.0"
+    }
+  },
+  "model_files": {
+    "best_model.pt": "8e35adedae1a03ad5644872769821d2966bb7613b5a1e070996929c7e5f2e492",
+    "display_text_map.json": "a2d2e008cf6232b29ee04596e1e1bb418ccf0b0587f41e42471cf22e3b2073a3",
+    "feature_config.json": "c9670b77a6ab44d766559497e6dbf61a8da9ebfeca45e4b77c0640e596d0a5dc",
+    "label_map_knee42.json": "18c8121f8cdfafaf957ba07c7b3181d51055ffdd71493ba27b91c2c7260339b9",
+    "standardizer_train_only.npz": "c252b4fdc9fa83179a75bb4726bd0062ebbd796a3beae35f3d47483d2456c391"
+  },
+  "required_layouts": {
+    "release_root": [
+      "VERSION_MANIFEST.json",
+      "LICENSE",
+      "THIRD_PARTY_NOTICES.md",
+      "INSTALL_zh-TW.md",
+      "MODEL_CARD.md",
+      "MODEL_LICENSE.md",
+      "requirements-windows-runtime.lock.txt",
+      "start_ivcam.cmd",
+      "auto_trigger_knee_ivcam_local.json",
+      "auto_trigger_provenance.json",
+      "golden_contract.json",
+      "packaging/knee42_ivcam/release_spec.json"
+    ],
+    "model": [
+      "best_model.pt",
+      "runtime_config.json",
+      "feature_config.json",
+      "standardizer_train_only.npz",
+      "label_map_knee42.json",
+      "display_text_map.json",
+      "selection_ledger.json",
+      "hand_landmarker.task",
+      "pose_landmarker.task",
+      "integrity_manifest.sha256"
+    ]
+  },
+  "license_identifiers": {
+    "application": "MIT",
+    "knee42_model": "CC-BY-NC-4.0",
+    "mediapipe_tasks": "Apache-2.0"
+  }
+}
