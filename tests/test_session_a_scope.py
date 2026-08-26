@@ -21,6 +21,16 @@ PLAN = (
     / "2026-08-26-knee42-v13.1-runnable-release.md"
 )
 
+BARE_PYTHON_COMMAND = re.compile(
+    r"(?:^|`)\s*(?:&\s*)?python(?:\.exe)?\s+(?=-|scripts?[\\/]|[\w.-]+\.py\b)",
+    flags=re.IGNORECASE | re.MULTILINE,
+)
+ANGLE_PLACEHOLDER = re.compile(r"<[^<>\r\n]+>")
+OUTPUT_COMMAND = re.compile(
+    r"(?:--output(?:-dir)?|--artifact-root|-OutputDir)\b",
+    flags=re.IGNORECASE,
+)
+
 
 class SessionAScopeTests(unittest.TestCase):
     @classmethod
@@ -56,24 +66,39 @@ class SessionAScopeTests(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertIn("Session A scope", text)
                 self.assertIn(
-                    "User-confirmed Phase 3 data decisions belong to Session B and "
-                    "are not modified or revalidated by Session A.",
+                    "User-confirmed Phase 3 data decisions and new model "
+                    "creation/training belong to Session B and are not modified or "
+                    "revalidated by Session A.",
                     text,
-                )
-                self.assertRegex(
-                    text,
-                    re.compile(
-                        r"Session C supplies a 42-label \[1,\s*64,\s*438\] model "
-                        r"component directory plus a caller-trusted component manifest "
-                        r"SHA-256\."
-                    ),
                 )
                 self.assertIn(
-                    "Session A verifies component-independent behavior with "
-                    "deterministic test fixtures; Session C performs the first build "
-                    "with the supplied release component.",
+                    "Session C integrates Session B's new compatible 42-label "
+                    "[1, 64, 438] model.",
                     text,
                 )
+                self.assertIn(
+                    "Session A validates runtime and packaging only with the audited "
+                    "default component or deterministic test fixtures; Session C "
+                    "performs the first build with Session B's supplied release "
+                    "component.",
+                    text,
+                )
+
+    def test_documents_use_portable_command_and_placeholder_hygiene(self):
+        for path, text in self.documents.items():
+            with self.subTest(path=path):
+                bare_commands = [
+                    match.group(0).strip() for match in BARE_PYTHON_COMMAND.finditer(text)
+                ]
+                self.assertEqual(
+                    [],
+                    bare_commands,
+                    f"bare Python commands in {path}: {bare_commands}",
+                )
+                self.assertIsNone(
+                    re.search(r"\b(?:CODEX_HOME|HOME)\b", text, flags=re.IGNORECASE)
+                )
+                self.assertIsNone(ANGLE_PLACEHOLDER.search(text))
 
     def test_session_a_is_not_assigned_phase_3_data_or_private_tag_work(self):
         forbidden_assignments = (
@@ -137,6 +162,32 @@ class SessionAScopeTests(unittest.TestCase):
         )
         self.assertIsNone(re.search(r"^\s*git\s+(?:push|tag)\b", plan, re.MULTILINE))
         self.assertIsNone(re.search(r"^\s*gh\s+pr\b", plan, re.MULTILINE))
+
+    def test_plan_routes_every_output_command_through_build_root(self):
+        plan = self.documents[PLAN]
+        output_lines = [
+            line for line in plan.splitlines() if OUTPUT_COMMAND.search(line)
+        ]
+        self.assertGreater(len(output_lines), 0)
+        for line in output_lines:
+            with self.subTest(line=line):
+                self.assertIn("$env:KNEE42_BUILD_ROOT", line)
+                self.assertIsNone(re.search(r"\sbuild[\\/]", line, re.IGNORECASE))
+
+    def test_locks_and_notices_precede_final_build_and_verification(self):
+        plan = self.documents[PLAN]
+        lock_task = plan.index(
+            "### Task 9: Windows locks, SBOM, and redistribution notices"
+        )
+        final_build = plan.index(
+            "Build the component-independent Session A fixture source-runtime and "
+            "Windows onedir artifacts now that locks and notices exist"
+        )
+        final_verification = plan.index(
+            "### Task 11: Clean extraction, install, replay, and artifact gates"
+        )
+        self.assertLess(lock_task, final_build)
+        self.assertLess(final_build, final_verification)
 
 
 if __name__ == "__main__":
