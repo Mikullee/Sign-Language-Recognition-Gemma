@@ -3,9 +3,11 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
+
+from recognition.realtime.knee42_clock import FramePacket, LiveClock, VideoClock
 
 
 def apply_video_transform(
@@ -36,12 +38,15 @@ class OpenCVFrameSource:
         status: str,
         cv2_module: Any,
         *,
+        clock: LiveClock | VideoClock,
         rotation_degrees: float = 0.0,
         horizontal_mirror: bool = False,
     ):
         self._capture = capture
         self._status = status
         self._cv2 = cv2_module
+        self._clock = clock
+        self._frame_index = 0
         self._rotation_degrees = rotation_degrees
         self._horizontal_mirror = horizontal_mirror
 
@@ -62,15 +67,45 @@ class OpenCVFrameSource:
         value = float(self._capture.get(self._cv2.CAP_PROP_FPS))
         return value if value > 0 else 0.0
 
-    def read(self):
+    @property
+    def clock_mode(self) -> str:
+        return self._clock.clock_mode
+
+    def read_packet(self) -> FramePacket | None:
         ok, frame = self._capture.read()
         if not ok:
-            return ok, frame
-        return ok, apply_video_transform(
+            if isinstance(self._clock, VideoClock):
+                self._clock.finalize()
+            return None
+        self._frame_index += 1
+        if isinstance(self._clock, VideoClock):
+            pos_msec_property = getattr(self._cv2, "CAP_PROP_POS_MSEC", None)
+            pos_msec = (
+                float("nan")
+                if pos_msec_property is None
+                else self._capture.get(pos_msec_property)
+            )
+            timestamp_sec = self._clock.next_timestamp(
+                pos_msec=pos_msec,
+                frame_index=self._frame_index,
+            )
+        else:
+            timestamp_sec = self._clock.next_timestamp()
+        transformed = apply_video_transform(
             frame,
             self._rotation_degrees,
             horizontal_mirror=self._horizontal_mirror,
         )
+        return FramePacket(
+            frame=transformed,
+            timestamp_sec=timestamp_sec,
+            clock_mode=self._clock.clock_mode,
+        )
+
+    def read(self):
+        """Return the legacy ``(ok, frame)`` pair while advancing the source clock."""
+        packet = self.read_packet()
+        return (False, None) if packet is None else (True, packet.frame)
 
     def release(self) -> None:
         self._capture.release()
@@ -96,6 +131,7 @@ def open_camera(
     max_index: int = 9,
     cv2_module: Any | None = None,
     platform_name: str | None = None,
+    perf_counter: Callable[[], float] | None = None,
 ) -> OpenCVFrameSource:
     """Open an explicit camera or probe indices 0..max_index without leaking handles."""
     cv2_module = _load_cv2(cv2_module)
@@ -108,7 +144,13 @@ def open_camera(
     for index in indices:
         capture = _camera_capture(cv2_module, int(index), platform_name)
         if capture.isOpened():
-            return OpenCVFrameSource(capture, f"camera:{index}", cv2_module)
+            clock = LiveClock() if perf_counter is None else LiveClock(perf_counter=perf_counter)
+            return OpenCVFrameSource(
+                capture,
+                f"camera:{index}",
+                cv2_module,
+                clock=clock,
+            )
         capture.release()
     if camera_index is not None:
         raise RuntimeError(f"camera index {camera_index} is unavailable")
@@ -129,6 +171,11 @@ def open_video(
     if not capture.isOpened():
         capture.release()
         raise RuntimeError(f"cannot open color video: {path}")
+    try:
+        clock = VideoClock(nominal_fps=float(capture.get(cv2_module.CAP_PROP_FPS)))
+    except (TypeError, ValueError):
+        capture.release()
+        raise
     orientation_meta = getattr(cv2_module, "CAP_PROP_ORIENTATION_META", None)
     rotation_degrees = float(capture.get(orientation_meta)) if orientation_meta is not None else 0.0
     orientation_auto = getattr(cv2_module, "CAP_PROP_ORIENTATION_AUTO", None)
@@ -138,5 +185,6 @@ def open_video(
         capture,
         f"video:{path}",
         cv2_module,
+        clock=clock,
         rotation_degrees=rotation_degrees,
     )

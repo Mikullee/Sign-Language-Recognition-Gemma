@@ -6,6 +6,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 import numpy as np
@@ -227,6 +228,158 @@ class RuntimeTests(unittest.TestCase):
         self.assertLess(detect_at, compose_at)
         self.assertNotIn("detectors.extract_observation(view", source)
         self.assertNotIn("detectors.extract_observation(display", source)
+
+    def test_runtime_uses_packet_timestamps_without_nominal_fps_synthesis(self):
+        from recognition.realtime.knee42_ivcam import run_capture
+
+        source = inspect.getsource(run_capture)
+
+        self.assertIn("source.read_packet()", source)
+        self.assertIn("packet.timestamp_sec", source)
+        self.assertNotIn("(raw_frames - 1) / source_fps", source)
+        self.assertNotIn("controller.add_held_observation(", source)
+        self.assertNotIn("frame_interval_sec", source)
+
+    def test_runtime_buffers_exact_packet_times_for_held_observations(self):
+        held_calls = []
+        recorder_origins = []
+
+        class PacketOnlySource:
+            status = "video:irregular.mp4"
+            fps = 240.0
+            clock_mode = "video_source_timestamp"
+
+            def __init__(self):
+                frame = np.zeros((4, 6, 3), dtype=np.uint8)
+                self._packets = [
+                    SimpleNamespace(frame=frame.copy(), timestamp_sec=timestamp, clock_mode="video_source_timestamp")
+                    for timestamp in (0.0, 0.033, 0.071)
+                ]
+                self.released = False
+
+            def read_packet(self):
+                return self._packets.pop(0) if self._packets else None
+
+            def release(self):
+                self.released = True
+
+        class FakeBundle:
+            def __init__(self, root):
+                self.root = root
+                self.sequence_length = 64
+                self.frame_step = 2
+                self.model_display_version = "test"
+
+            def predict(self, _values, _mask):
+                predictions = (
+                    Prediction("K42_01", "你好", 0.8),
+                    Prediction("K42_02", "謝謝", 0.1),
+                    Prediction("K42_03", "再見", 0.1),
+                )
+                return InferenceResult(top1=predictions[0], top3=predictions)
+
+        class FakeAutoController:
+            def __init__(self, _config, *, initial_mode):
+                self.mode = initial_mode
+                self.state = "WAITING"
+                self.calibrated = True
+
+            def add_held_observation_at_times(self, timestamps_sec, _trigger, feature):
+                held_calls.append((tuple(timestamps_sec), float(feature[0][0])))
+                return SimpleNamespace(
+                    infer=len(held_calls) == 2,
+                    features=(feature,),
+                    segment=None,
+                )
+
+            def finalize_video_eof(self):
+                return SimpleNamespace(infer=False, features=(), segment=None)
+
+            def reset(self):
+                return None
+
+        class FakeDetectors:
+            def __init__(self):
+                self.calls = 0
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def extract_observation(self, _frame):
+                detector_value = float(self.calls)
+                self.calls += 1
+                return SimpleNamespace(
+                    display_pose=None,
+                    display_left_hand=None,
+                    display_right_hand=None,
+                    recognition_values=np.full(219, detector_value, dtype=np.float32),
+                    recognition_mask=np.ones(219, dtype=np.bool_),
+                    trigger_values=np.ones(225, dtype=np.float32),
+                )
+
+        class FakeRecorder:
+            segment_count = 0
+
+            def __init__(self, _output_root, **kwargs):
+                recorder_origins.append(kwargs["source_origin_sec"])
+                self.frame_count = 0
+
+            def add_frame(self, _frame):
+                self.frame_count += 1
+
+            def record_segment(self, _segment, _result):
+                return None
+
+            def stop(self):
+                return SimpleNamespace(
+                    session_dir=Path("recording"),
+                    segment_count=0,
+                    frame_count=self.frame_count,
+                )
+
+        packet_source = PacketOnlySource()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            bundle_root = root / "model"
+            bundle_root.mkdir()
+            (root / "auto_trigger_knee_ivcam_local.json").write_text("{}", encoding="utf-8")
+            bundle = FakeBundle(bundle_root)
+
+            with (
+                mock.patch.object(knee42_ivcam, "verify_auto_trigger_provenance"),
+                mock.patch.object(knee42_ivcam, "load_bundle", return_value=bundle),
+                mock.patch.object(knee42_ivcam, "open_video", return_value=packet_source),
+                mock.patch.object(knee42_ivcam, "load_auto_trigger_config", return_value=object()),
+                mock.patch.object(knee42_ivcam, "AutoKnee42Controller", FakeAutoController),
+                mock.patch.object(knee42_ivcam, "create_mediapipe_detectors", return_value=FakeDetectors()),
+                mock.patch.object(knee42_ivcam, "SegmentSessionRecorder", FakeRecorder),
+            ):
+                result = knee42_ivcam.run_capture(
+                    bundle_root,
+                    mode="auto",
+                    camera_index=None,
+                    video=Path("irregular.mp4"),
+                    device=torch.device("cpu"),
+                    headless=True,
+                    max_frames=None,
+                    start_logging=True,
+                )
+
+        self.assertEqual(
+            held_calls,
+            [
+                ((0.0, 0.033), 0.0),
+                ((0.071,), 1.0),
+            ],
+        )
+        self.assertEqual(recorder_origins, [0.0])
+        self.assertEqual(result["raw_frames"], 3)
+        self.assertEqual(result["feature_frames"], 2)
+        self.assertEqual(result["clock_mode"], "video_source_timestamp")
+        self.assertTrue(packet_source.released)
 
     def test_auto_trigger_provenance_rejects_source_tampering(self):
         with tempfile.TemporaryDirectory() as temp_dir:

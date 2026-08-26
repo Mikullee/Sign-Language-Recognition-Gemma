@@ -16,7 +16,7 @@ from recognition.realtime.knee42_preprocessing import observation_from_results
 ROOT = Path(__file__).resolve().parents[1]
 TEMPLATE = ROOT / "packaging" / "knee42_ivcam"
 ARCHIVED_TRIGGER_SHA256 = "0092136a14a859c7a11aa0e5df9d0920a37471e8da09718828eb773d00d6fdc7"
-ARCHIVED_CONTROLLER_SHA256 = "32adf8ddb026a79cb68b8a71b0e60d784d70605c201f772d32ef38d367bcb5b4"
+ARCHIVED_CONTROLLER_SHA256 = "969f164356fa0abb532d924e08714bca781cba2eb0fc0fef658f577f8e9ec12b"
 ARCHIVED_CONFIG_SHA256 = "d21f64f4f45f343964a532c5525ff5a4ce5669c9dcbc288cc7b65ccdf62ef728"
 ARCHIVED_ZIP_SHA256 = "d31da3a2075321304cc595657417bf810eb52ee83ff5057a09aec9a2218f4f3c"
 
@@ -209,6 +209,22 @@ class AutoKnee42ControllerTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "monotonic"):
             controller.add_observation(0.9, trigger, ("two", "two"))
 
+    def test_direct_observation_rejects_nonfinite_timestamp(self):
+        trigger = np.zeros(225, dtype=np.float32)
+
+        for timestamp in (float("nan"), float("inf"), float("-inf")):
+            with self.subTest(timestamp=timestamp):
+                controller = AutoKnee42Controller(
+                    AutoTriggerConfig(reference_rest_enabled=False),
+                    analysis_fn=frame_analysis,
+                )
+                with self.assertRaisesRegex(ValueError, "finite"):
+                    controller.add_observation(
+                        timestamp,
+                        trigger,
+                        ("values", "mask"),
+                    )
+
     def test_video_eof_completes_an_existing_end_confirmation_only(self):
         controller = AutoKnee42Controller(
             AutoTriggerConfig(
@@ -236,7 +252,7 @@ class AutoKnee42ControllerTests(unittest.TestCase):
             )
 
         self.assertEqual(controller.state, "END_CONFIRM")
-        event = controller.finalize_video_eof(frame_interval_sec=0.10)
+        event = controller.finalize_video_eof()
 
         self.assertTrue(event.infer)
         self.assertEqual(event.message, "visible_rest_finalize")
@@ -305,6 +321,60 @@ class AutoKnee42ControllerTests(unittest.TestCase):
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0].message, "visible_rest_finalize")
 
+    def test_held_samples_use_exact_irregular_collected_timestamps(self):
+        controller = AutoKnee42Controller(
+            AutoTriggerConfig(
+                knee_geometry_enabled=False,
+                reference_rest_enabled=False,
+            ),
+            analysis_fn=frame_analysis,
+        )
+
+        controller.add_held_observation_at_times(
+            [0.033, 0.071],
+            np.ones(225, dtype=np.float32),
+            ("values", "mask"),
+        )
+
+        self.assertEqual(controller.sample_timestamps, (0.033, 0.071))
+
+    def test_held_samples_reject_empty_nonfinite_and_regressing_sequences(self):
+        trigger = np.ones(225, dtype=np.float32)
+        invalid_sequences = (
+            ([], "empty"),
+            ([0.033, float("nan")], "finite"),
+            ([0.071, 0.033], "monotonic"),
+        )
+
+        for timestamps, message in invalid_sequences:
+            with self.subTest(timestamps=timestamps):
+                controller = AutoKnee42Controller(
+                    AutoTriggerConfig(reference_rest_enabled=False),
+                    analysis_fn=frame_analysis,
+                )
+                with self.assertRaisesRegex(ValueError, message):
+                    controller.add_held_observation_at_times(
+                        timestamps,
+                        trigger,
+                        ("values", "mask"),
+                    )
+                self.assertEqual(controller.sample_timestamps, ())
+
+    def test_held_samples_reject_regression_against_previous_observation(self):
+        controller = AutoKnee42Controller(
+            AutoTriggerConfig(reference_rest_enabled=False),
+            analysis_fn=frame_analysis,
+        )
+        trigger = np.ones(225, dtype=np.float32)
+        controller.add_observation(0.071, trigger, ("first", "first"))
+
+        with self.assertRaisesRegex(ValueError, "monotonic"):
+            controller.add_held_observation_at_times(
+                [0.033],
+                trigger,
+                ("second", "second"),
+            )
+
     def test_held_samples_reuse_one_real_motion_analysis(self):
         calls = []
 
@@ -324,12 +394,10 @@ class AutoKnee42ControllerTests(unittest.TestCase):
             analysis_fn=counted_analysis,
         )
 
-        controller.add_held_observation(
-            0.0,
+        controller.add_held_observation_at_times(
+            [0.033, 0.071],
             np.ones(225, dtype=np.float32),
             ("values", "mask"),
-            frame_interval_sec=1.0 / 30.0,
-            sample_count=2,
         )
 
         self.assertEqual(len(calls), 1)

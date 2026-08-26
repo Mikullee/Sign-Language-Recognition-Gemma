@@ -510,6 +510,11 @@ def run_capture(
     last_result: InferenceResult | None = None
     raw_frames = 0
     feature_frames = 0
+    pending_packet_timestamps: list[float] = []
+    pending_auto_observation: tuple[
+        np.ndarray,
+        tuple[np.ndarray, np.ndarray],
+    ] | None = None
     started = time.perf_counter()
     recorder: SegmentSessionRecorder | None = None
     recording_requested = bool(start_logging)
@@ -537,20 +542,46 @@ def run_capture(
         if recorder is not None and event.segment is not None:
             recorder.record_segment(event.segment, result)
 
+    def handle_controller_event(event) -> None:
+        nonlocal last_result
+        if not event.infer:
+            return
+        last_result = _predict_features(bundle, event.features)
+        save_auto_result(event, last_result)
+        if isinstance(controller, AutoKnee42Controller) and controller.mode == "manual":
+            controller.mark_result()
+
+    def flush_pending_auto_observation():
+        nonlocal pending_auto_observation
+        if pending_auto_observation is None or not pending_packet_timestamps:
+            return None
+        trigger_values, feature = pending_auto_observation
+        timestamps = tuple(pending_packet_timestamps)
+        pending_auto_observation = None
+        pending_packet_timestamps.clear()
+        assert isinstance(controller, AutoKnee42Controller)
+        return controller.add_held_observation_at_times(
+            timestamps,
+            trigger_values,
+            feature,
+        )
+
     try:
         with create_mediapipe_detectors(bundle) as detectors:
             while max_frames is None or raw_frames < max_frames:
-                ok, frame = source.read()
-                if not ok:
+                packet = source.read_packet()
+                if packet is None:
                     break
+                frame = packet.frame
                 raw_frames += 1
+                pending_packet_timestamps.append(packet.timestamp_sec)
                 source_fps = source.fps if source.fps > 0 else 30.0
                 if recording_requested and recorder is None:
                     recorder = SegmentSessionRecorder(
                         recordings_dir,
                         fps=source_fps,
                         frame_size=(int(frame.shape[1]), int(frame.shape[0])),
-                        source_origin_sec=(raw_frames - 1) / source_fps,
+                        source_origin_sec=packet.timestamp_sec,
                     )
                 if recorder is not None:
                     recorder.add_frame(frame)
@@ -565,29 +596,40 @@ def run_capture(
                     )
                     feature_frames += 1
                     if isinstance(controller, AutoKnee42Controller):
-                        source_fps = source.fps if source.fps > 0 else 30.0
-                        timestamp_sec = (raw_frames - 1) / source_fps
                         if controller.mode == "auto":
-                            event = controller.add_held_observation(
-                                timestamp_sec,
+                            if pending_auto_observation is not None:
+                                raise RuntimeError(
+                                    "detector produced a new observation before the previous "
+                                    "held observation was consumed"
+                                )
+                            pending_auto_observation = (
                                 observation.trigger_values,
                                 feature,
-                                frame_interval_sec=1.0 / source_fps,
-                                sample_count=bundle.frame_step,
                             )
                         else:
                             event = controller.add_observation(
-                                timestamp_sec,
+                                packet.timestamp_sec,
                                 observation.trigger_values,
                                 feature,
                             )
                     else:
                         event = controller.add_feature(feature)
-                    if event.infer:
-                        last_result = _predict_features(bundle, event.features)
-                        save_auto_result(event, last_result)
-                        if isinstance(controller, AutoKnee42Controller) and controller.mode == "manual":
-                            controller.mark_result()
+                    if not (
+                        isinstance(controller, AutoKnee42Controller)
+                        and controller.mode == "auto"
+                    ):
+                        pending_packet_timestamps.clear()
+                        pending_auto_observation = None
+                        handle_controller_event(event)
+                if (
+                    isinstance(controller, AutoKnee42Controller)
+                    and controller.mode == "auto"
+                    and pending_auto_observation is not None
+                    and len(pending_packet_timestamps) >= bundle.frame_step
+                ):
+                    event = flush_pending_auto_observation()
+                    assert event is not None
+                    handle_controller_event(event)
                 elapsed = max(time.perf_counter() - started, 1e-6)
                 fps = raw_frames / elapsed
                 if not headless:
@@ -633,13 +675,19 @@ def run_capture(
                             if not isinstance(controller, AutoKnee42Controller) or controller.mode != "auto":
                                 continue
                             controller.reset()
+                            pending_packet_timestamps.clear()
+                            pending_auto_observation = None
                             last_result = None
                             recording_requested = True
                     elif key in (ord("r"), ord("R")):
                         controller.reset()
+                        pending_packet_timestamps.clear()
+                        pending_auto_observation = None
                         last_result = None
                     elif key in (ord("m"), ord("M")) and isinstance(controller, AutoKnee42Controller):
                         controller.toggle_mode()
+                        pending_packet_timestamps.clear()
+                        pending_auto_observation = None
                         last_result = None
                     elif key == 32 and isinstance(controller, AutoKnee42Controller):
                         event = controller.on_space()
@@ -647,15 +695,20 @@ def run_capture(
                             last_result = _predict_features(bundle, event.features)
                             controller.mark_result()
             if (
+                isinstance(controller, AutoKnee42Controller)
+                and controller.mode == "auto"
+                and pending_auto_observation is not None
+            ):
+                event = flush_pending_auto_observation()
+                assert event is not None
+                handle_controller_event(event)
+            if (
                 video is not None
                 and isinstance(controller, AutoKnee42Controller)
                 and controller.mode == "auto"
                 and last_result is None
             ):
-                source_fps = source.fps if source.fps > 0 else 30.0
-                event = controller.finalize_video_eof(
-                    frame_interval_sec=1.0 / source_fps
-                )
+                event = controller.finalize_video_eof()
                 if event.infer:
                     last_result = _predict_features(bundle, event.features)
                     save_auto_result(event, last_result)
@@ -681,6 +734,7 @@ def run_capture(
         )
     output = {
         "source": source.status,
+        "clock_mode": source.clock_mode,
         "mode": controller.mode if isinstance(controller, AutoKnee42Controller) else "sliding",
         "raw_frames": raw_frames,
         "feature_frames": feature_frames,

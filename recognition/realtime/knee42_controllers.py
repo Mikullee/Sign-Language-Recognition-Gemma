@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any, Callable, Sequence
 
 import numpy as np
 
@@ -165,6 +165,10 @@ class AutoKnee42Controller:
         return len(self._timestamps)
 
     @property
+    def sample_timestamps(self) -> tuple[float, ...]:
+        return tuple(self._timestamps)
+
+    @property
     def calibrated(self) -> bool:
         return bool(
             not self.config.reference_rest_enabled
@@ -178,6 +182,8 @@ class AutoKnee42Controller:
         feature: Any,
     ) -> ControllerEvent:
         timestamp_sec = float(timestamp_sec)
+        if not np.isfinite(timestamp_sec):
+            raise ValueError("Frame timestamps must be finite.")
         if self._last_timestamp is not None and timestamp_sec < self._last_timestamp:
             raise ValueError("Frame timestamps must be monotonic.")
         trigger = np.asarray(trigger_values, dtype=np.float32)
@@ -250,39 +256,65 @@ class AutoKnee42Controller:
         frame_interval_sec: float,
         sample_count: int,
     ) -> ControllerEvent:
-        """Hold one detector result across skipped source frames for trigger timing."""
+        """Compatibility wrapper for callers that still provide a nominal interval."""
         frame_interval_sec = float(frame_interval_sec)
         sample_count = int(sample_count)
         if frame_interval_sec <= 0 or sample_count <= 0:
             raise ValueError("frame_interval_sec and sample_count must be positive")
         timestamp_sec = float(timestamp_sec)
-        if self._last_timestamp is not None and timestamp_sec < self._last_timestamp:
-            raise ValueError("Frame timestamps must be monotonic.")
+        return self.add_held_observation_at_times(
+            [
+                timestamp_sec + sample_index * frame_interval_sec
+                for sample_index in range(sample_count)
+            ],
+            trigger_values,
+            feature,
+        )
+
+    def add_held_observation_at_times(
+        self,
+        timestamp_sec_values: Sequence[float],
+        trigger_values: np.ndarray,
+        feature: Any,
+    ) -> ControllerEvent:
+        """Hold one detector result at each exact collected source timestamp."""
+        timestamps = tuple(float(value) for value in timestamp_sec_values)
+        if not timestamps:
+            raise ValueError("held observation timestamps cannot be empty")
+        if not all(np.isfinite(value) for value in timestamps):
+            raise ValueError("held observation timestamps must be finite")
+        previous = self._last_timestamp
+        for timestamp_sec in timestamps:
+            if previous is not None and timestamp_sec < previous:
+                raise ValueError("Frame timestamps must be monotonic.")
+            previous = timestamp_sec
+
         trigger = np.asarray(trigger_values, dtype=np.float32)
         if trigger.shape != (225,):
             raise ValueError(f"expected 225 trigger values, got {trigger.shape}")
         if self.mode == "manual":
             event = ControllerEvent(self.state)
-            for sample_index in range(sample_count):
-                event = self.add_observation(
-                    timestamp_sec + sample_index * frame_interval_sec,
-                    trigger,
-                    feature,
-                )
-            return event
+            inference_event: ControllerEvent | None = None
+            for timestamp_sec in timestamps:
+                event = self.add_observation(timestamp_sec, trigger, feature)
+                if event.infer and inference_event is None:
+                    inference_event = event
+            return inference_event or event
+
         analysis = self._analysis_fn(self._previous_trigger, trigger, self.config)
         self._previous_trigger = trigger.copy()
         event = ControllerEvent(self.state)
-        for sample_index in range(sample_count):
+        inference_event = None
+        for timestamp_sec in timestamps:
             event = self._add_analyzed_observation(
-                timestamp_sec + sample_index * frame_interval_sec,
+                timestamp_sec,
                 trigger,
                 feature,
                 analysis,
             )
-            if event.infer:
-                return event
-        return event
+            if event.infer and inference_event is None:
+                inference_event = event
+        return inference_event or event
 
     def toggle_mode(self) -> ControllerEvent:
         target = "manual" if self.mode == "auto" else "auto"
@@ -295,11 +327,16 @@ class AutoKnee42Controller:
             return ControllerEvent(self.state, message="space is available in manual mode")
         return self._manual.on_space()
 
-    def finalize_video_eof(self, *, frame_interval_sec: float) -> ControllerEvent:
+    def finalize_video_eof(
+        self,
+        *,
+        frame_interval_sec: float | None = None,
+    ) -> ControllerEvent:
         """Complete an already-started rest confirmation at recorded-video EOF."""
-        frame_interval_sec = float(frame_interval_sec)
-        if frame_interval_sec <= 0:
-            raise ValueError("frame_interval_sec must be positive")
+        if frame_interval_sec is not None:
+            frame_interval_sec = float(frame_interval_sec)
+            if not np.isfinite(frame_interval_sec) or frame_interval_sec <= 0:
+                raise ValueError("frame_interval_sec must be finite positive")
         if (
             self.mode != "auto"
             or self.state != "END_CONFIRM"
@@ -307,6 +344,21 @@ class AutoKnee42Controller:
             or self._last_rest_trigger is None
         ):
             return ControllerEvent(self.state)
+        if frame_interval_sec is None:
+            observed_timestamps = tuple(self._timestamps)
+            observed_intervals = [
+                later - earlier
+                for earlier, later in zip(
+                    observed_timestamps[:-1],
+                    observed_timestamps[1:],
+                )
+                if later > earlier
+            ]
+            if not observed_intervals:
+                raise ValueError(
+                    "cannot finalize video EOF without advancing collected timestamps"
+                )
+            frame_interval_sec = float(np.median(observed_intervals))
         # Allow one transition frame plus endpoint/granularity slack before the
         # end-hold window contains a full interval of repeated rest evidence.
         repeats = int(np.ceil(self.config.end_hold_sec / frame_interval_sec)) + 4

@@ -9,10 +9,18 @@ from recognition.realtime.knee42_controllers import ManualController, SlidingCon
 
 
 class FakeCapture:
-    def __init__(self, opened: bool, frames=None, fps: float = 30.0):
+    def __init__(
+        self,
+        opened: bool,
+        frames=None,
+        fps: float = 30.0,
+        pos_msec=None,
+    ):
         self.opened = opened
         self.frames = list(frames or [])
         self.fps_value = fps
+        self.pos_msec = list(pos_msec or [])
+        self.last_pos_msec = float("nan")
         self.released = False
 
     def isOpened(self):
@@ -21,31 +29,50 @@ class FakeCapture:
     def read(self):
         if not self.frames:
             return False, None
+        if self.pos_msec:
+            self.last_pos_msec = self.pos_msec.pop(0)
         return True, self.frames.pop(0)
 
     def release(self):
         self.released = True
 
-    def get(self, _property):
+    def get(self, property_id):
+        if property_id == FakeCv2.CAP_PROP_POS_MSEC:
+            return self.last_pos_msec
         return self.fps_value
 
 
 class FakeCv2:
     CAP_DSHOW = 700
     CAP_PROP_FPS = 5
+    CAP_PROP_POS_MSEC = 0
 
-    def __init__(self, opened_indices=(), video_frames=None):
+    def __init__(
+        self,
+        opened_indices=(),
+        camera_frames=None,
+        video_frames=None,
+        video_pos_msec=None,
+    ):
         self.opened_indices = set(opened_indices)
+        self.camera_frames = list(camera_frames or [])
         self.video_frames = list(video_frames or [])
+        self.video_pos_msec = list(video_pos_msec or [])
         self.calls = []
         self.captures = []
 
     def VideoCapture(self, source, *backend):
         self.calls.append((source, *backend))
         if isinstance(source, int):
-            capture = FakeCapture(source in self.opened_indices, frames=[f"camera-{source}"])
+            frames = self.camera_frames or [f"camera-{source}"]
+            capture = FakeCapture(source in self.opened_indices, frames=frames)
         else:
-            capture = FakeCapture(bool(self.video_frames), frames=self.video_frames, fps=25.0)
+            capture = FakeCapture(
+                bool(self.video_frames),
+                frames=self.video_frames,
+                fps=25.0,
+                pos_msec=self.video_pos_msec,
+            )
         self.captures.append(capture)
         return capture
 
@@ -76,6 +103,28 @@ class CaptureTests(unittest.TestCase):
         self.assertFalse(fake_cv2.captures[2].released)
         source.release()
 
+    def test_camera_packets_use_injected_live_clock_not_reported_fps(self):
+        fake_cv2 = FakeCv2(
+            opened_indices={2},
+            camera_frames=["camera-a", "camera-b", "camera-c"],
+        )
+        perf_counter = iter((100.0, 100.055, 100.310)).__next__
+        source = open_camera(
+            2,
+            cv2_module=fake_cv2,
+            platform_name="win32",
+            perf_counter=perf_counter,
+        )
+
+        packets = [source.read_packet() for _ in range(3)]
+
+        self.assertEqual([packet.frame for packet in packets], ["camera-a", "camera-b", "camera-c"])
+        self.assertEqual(packets[0].timestamp_sec, 0.0)
+        self.assertAlmostEqual(packets[1].timestamp_sec, 0.055)
+        self.assertAlmostEqual(packets[2].timestamp_sec, 0.310)
+        self.assertTrue(all(packet.clock_mode == "live_perf_counter" for packet in packets))
+        self.assertEqual(source.clock_mode, "live_perf_counter")
+
     def test_no_camera_releases_every_probe_and_fails(self):
         fake_cv2 = FakeCv2()
 
@@ -99,6 +148,74 @@ class CaptureTests(unittest.TestCase):
             self.assertEqual(source.read(), (True, "frame-a"))
             source.release()
             self.assertTrue(fake_cv2.captures[0].released)
+
+    def test_video_packets_preserve_vfr_pos_msec_timestamps(self):
+        fake_cv2 = FakeCv2(
+            video_frames=["frame-a", "frame-b", "frame-c"],
+            video_pos_msec=[0.0, 41.0, 127.0],
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "color.avi"
+            path.write_bytes(b"fixture")
+            source = open_video(path, cv2_module=fake_cv2)
+
+            packets = [source.read_packet() for _ in range(3)]
+
+        self.assertEqual([packet.frame for packet in packets], ["frame-a", "frame-b", "frame-c"])
+        self.assertEqual(packets[0].timestamp_sec, 0.0)
+        self.assertAlmostEqual(packets[1].timestamp_sec, 0.041)
+        self.assertAlmostEqual(packets[2].timestamp_sec, 0.127)
+        self.assertEqual(
+            [packet.clock_mode for packet in packets],
+            [
+                "video_timestamp_pending",
+                "video_source_timestamp",
+                "video_source_timestamp",
+            ],
+        )
+        self.assertEqual(source.clock_mode, "video_source_timestamp")
+
+    def test_video_packet_fallback_is_sticky_after_pos_msec_stalls(self):
+        fake_cv2 = FakeCv2(
+            video_frames=["frame-a", "frame-b", "frame-c"],
+            video_pos_msec=[0.0, 0.0, 127.0],
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "color.avi"
+            path.write_bytes(b"fixture")
+            source = open_video(path, cv2_module=fake_cv2)
+
+            packets = [source.read_packet() for _ in range(3)]
+
+        self.assertEqual(packets[0].timestamp_sec, 0.0)
+        self.assertAlmostEqual(packets[1].timestamp_sec, 1.0 / 25.0)
+        self.assertAlmostEqual(packets[2].timestamp_sec, 2.0 / 25.0)
+        self.assertEqual(
+            [packet.clock_mode for packet in packets],
+            [
+                "video_timestamp_pending",
+                "video_nominal_fps_fallback",
+                "video_nominal_fps_fallback",
+            ],
+        )
+
+    def test_one_frame_video_resolves_pending_mode_when_eof_is_observed(self):
+        fake_cv2 = FakeCv2(
+            video_frames=["frame-a"],
+            video_pos_msec=[0.0],
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "color.avi"
+            path.write_bytes(b"fixture")
+            source = open_video(path, cv2_module=fake_cv2)
+
+            packet = source.read_packet()
+            eof = source.read_packet()
+
+        self.assertEqual(packet.timestamp_sec, 0.0)
+        self.assertEqual(packet.clock_mode, "video_timestamp_pending")
+        self.assertIsNone(eof)
+        self.assertEqual(source.clock_mode, "video_nominal_fps_fallback")
 
 
 class ControllerTests(unittest.TestCase):
