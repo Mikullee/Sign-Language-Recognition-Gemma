@@ -64,6 +64,8 @@ class VideoClock:
         self._previous_source_sec: float | None = None
         self._previous_timestamp_sec: float | None = None
         self._previous_frame_index: int | None = None
+        self._fallback_anchor_sec: float | None = None
+        self._fallback_anchor_frame_index: int | None = None
 
     @property
     def clock_mode(self) -> str:
@@ -128,7 +130,7 @@ class VideoClock:
             if source_sec <= self._previous_source_sec:
                 return self._select_fallback(frame_index)
             self._clock_mode = VIDEO_SOURCE_MODE
-        elif source_sec < self._previous_source_sec:
+        elif source_sec <= self._previous_source_sec:
             return self._select_fallback(frame_index)
 
         self._previous_source_sec = source_sec
@@ -138,14 +140,20 @@ class VideoClock:
         timestamp_sec = self._fallback_timestamp(frame_index)
         if (
             self._previous_timestamp_sec is not None
-            and timestamp_sec < self._previous_timestamp_sec
+            and timestamp_sec <= self._previous_timestamp_sec
         ):
-            raise ValueError(
-                "video source timestamp became unusable and nominal-FPS fallback "
-                f"would regress from {self._previous_timestamp_sec!r} to {timestamp_sec!r}"
+            self._fallback_anchor_sec = (
+                self._previous_timestamp_sec + 1.0 / self.nominal_fps
             )
+            self._fallback_anchor_frame_index = frame_index
+            timestamp_sec = self._fallback_anchor_sec
         self._clock_mode = VIDEO_FALLBACK_MODE
         return timestamp_sec
 
     def _fallback_timestamp(self, frame_index: int) -> float:
+        if self._fallback_anchor_sec is not None:
+            assert self._fallback_anchor_frame_index is not None
+            return self._fallback_anchor_sec + (
+                frame_index - self._fallback_anchor_frame_index
+            ) / self.nominal_fps
         return (frame_index - 1) / self.nominal_fps

@@ -114,6 +114,35 @@ class VideoClockTests(unittest.TestCase):
         self.assertAlmostEqual(fourth, 3.0 / 30.0)
         self.assertEqual(clock.clock_mode, "video_nominal_fps_fallback")
 
+    def test_stalled_source_timestamp_selects_sticky_nominal_fallback(self):
+        clock = VideoClock(nominal_fps=25.0)
+
+        timestamps = [
+            clock.next_timestamp(pos_msec=0.0, frame_index=1),
+            clock.next_timestamp(pos_msec=41.0, frame_index=2),
+            clock.next_timestamp(pos_msec=41.0, frame_index=3),
+        ]
+        later = clock.next_timestamp(pos_msec=500.0, frame_index=4)
+
+        self.assertEqual(timestamps[0], 0.0)
+        self.assertAlmostEqual(timestamps[1], 0.041)
+        self.assertAlmostEqual(timestamps[2], 0.08)
+        self.assertAlmostEqual(later, 0.12)
+        self.assertEqual(clock.clock_mode, "video_nominal_fps_fallback")
+
+    def test_fallback_anchors_after_source_gets_ahead_of_nominal_cadence(self):
+        clock = VideoClock(nominal_fps=25.0)
+        clock.next_timestamp(pos_msec=0.0, frame_index=1)
+        second = clock.next_timestamp(pos_msec=200.0, frame_index=2)
+
+        third = clock.next_timestamp(pos_msec=200.0, frame_index=3)
+        fourth = clock.next_timestamp(pos_msec=500.0, frame_index=4)
+
+        self.assertAlmostEqual(second, 0.2)
+        self.assertAlmostEqual(third, 0.24)
+        self.assertAlmostEqual(fourth, 0.28)
+        self.assertEqual(clock.clock_mode, "video_nominal_fps_fallback")
+
     def test_invalid_nominal_fps_is_rejected(self):
         for fps in (0.0, -1.0, math.nan, math.inf, -math.inf):
             with self.subTest(fps=fps):
