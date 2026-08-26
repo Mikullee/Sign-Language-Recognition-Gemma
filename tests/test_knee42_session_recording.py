@@ -6,9 +6,11 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 import cv2
 import numpy as np
+import recognition.realtime.knee42_session_recording as session_recording
 
 from recognition.realtime.knee42_controllers import SegmentEvidence
 from recognition.realtime.knee42_session_recording import SegmentSessionRecorder, frame_bounds
@@ -34,8 +36,106 @@ class FrameBoundsTests(unittest.TestCase):
         self.assertEqual(frame_bounds(10.0, 10.2, 10.5, 10.0, 12), (2, 6))
         self.assertEqual(frame_bounds(10.0, 9.0, 12.0, 10.0, 12), (0, 12))
 
+    def test_timestamp_bounds_use_left_and_right_bisect_for_vfr_frames(self):
+        bounds = getattr(session_recording, "timestamp_frame_bounds", None)
+
+        self.assertTrue(callable(bounds), "timestamp_frame_bounds API is missing")
+        self.assertEqual(bounds([0.0, 0.1, 0.4], 0.4, 0.4), (2, 3))
+        self.assertEqual(bounds([0.0, 0.1, 0.4], -1.0, 1.0), (0, 3))
+
 
 class SegmentSessionRecorderTests(unittest.TestCase):
+    def test_recorder_rejects_nonfinite_or_impractical_source_fps_before_writer(self):
+        fake_cv2 = mock.Mock()
+        fake_cv2.VideoWriter.side_effect = AssertionError("writer must not be opened")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            for fps in (float("nan"), float("inf"), 0.0, -1.0, 240.0001):
+                with self.subTest(fps=fps):
+                    with self.assertRaisesRegex(ValueError, "finite|practical|240"):
+                        SegmentSessionRecorder(
+                            Path(temp_dir),
+                            fps=fps,
+                            frame_size=(32, 24),
+                            source_origin_sec=0.0,
+                            now=lambda: f"invalid-{fps}",
+                            cv2_module=fake_cv2,
+                        )
+
+        fake_cv2.VideoWriter.assert_not_called()
+
+    def test_vfr_timestamps_select_the_actual_end_frame_and_are_audited(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            recorder = SegmentSessionRecorder(
+                Path(temp_dir),
+                fps=10.0,
+                frame_size=(32, 24),
+                source_origin_sec=0.0,
+                context_sec=0.0,
+                now=lambda: "vfr",
+            )
+            try:
+                for index, timestamp_sec in enumerate((0.0, 0.1, 0.4)):
+                    recorder.add_frame(
+                        np.full((24, 32, 3), index * 80, dtype=np.uint8),
+                        timestamp_sec=timestamp_sec,
+                    )
+                prediction = SimpleNamespace(
+                    label_id="K42_01",
+                    display_text="你好",
+                    confidence=1.0,
+                )
+                recorder.record_segment(
+                    SegmentEvidence(0.4, 0.4, 0.4, "visible_rest_finalize"),
+                    SimpleNamespace(top1=prediction, top3=(prediction,)),
+                )
+
+                summary = recorder.stop()
+            finally:
+                recorder.stop()
+
+            metadata = json.loads(
+                (summary.session_dir / "metadata" / "segment_0001.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            exact = summary.session_dir / metadata["exact_clip"]
+            self.assertEqual(count_frames(exact), 1)
+            self.assertEqual(metadata["clock_timestamps"]["exact_frame_bounds"], [2, 3])
+            self.assertEqual(
+                metadata["clock_timestamps"]["exact_frame_timestamps_sec"],
+                [0.4],
+            )
+            self.assertEqual(
+                metadata["clock_timestamps"]["session_frame_timestamps_sec"],
+                [0.0, 0.1, 0.4],
+            )
+
+    def test_add_frame_rejects_nonfinite_and_regressing_timestamps_atomically(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            recorder = SegmentSessionRecorder(
+                Path(temp_dir),
+                fps=30.0,
+                frame_size=(32, 24),
+                source_origin_sec=0.0,
+                now=lambda: "timestamps",
+            )
+            frame = np.zeros((24, 32, 3), dtype=np.uint8)
+            try:
+                recorder.add_frame(frame, timestamp_sec=0.1)
+
+                for timestamp_sec, message in (
+                    (float("nan"), "finite"),
+                    (0.09, "nondecreasing"),
+                ):
+                    with self.subTest(timestamp_sec=timestamp_sec):
+                        with self.assertRaisesRegex(ValueError, message):
+                            recorder.add_frame(frame, timestamp_sec=timestamp_sec)
+
+                self.assertEqual(recorder.stop().frame_count, 1)
+            finally:
+                recorder.stop()
+
     def test_stop_materializes_exact_and_context_clips_with_metadata(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

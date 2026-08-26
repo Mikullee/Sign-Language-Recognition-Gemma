@@ -11,6 +11,7 @@ LIVE_CLOCK_MODE = "live_perf_counter"
 VIDEO_PENDING_MODE = "video_timestamp_pending"
 VIDEO_SOURCE_MODE = "video_source_timestamp"
 VIDEO_FALLBACK_MODE = "video_nominal_fps_fallback"
+MAX_PRACTICAL_FPS = 240.0
 
 
 @dataclass(frozen=True)
@@ -38,9 +39,9 @@ class LiveClock:
         reading = float(self._perf_counter())
         if not math.isfinite(reading):
             raise ValueError(f"live perf_counter reading must be finite, got {reading!r}")
-        if self._previous_reading is not None and reading < self._previous_reading:
+        if self._previous_reading is not None and reading <= self._previous_reading:
             raise ValueError(
-                "live perf_counter reading regressed "
+                "live perf_counter readings must strictly advance monotonically; "
                 f"from {self._previous_reading!r} to {reading!r}"
             )
         if self._origin is None:
@@ -54,9 +55,14 @@ class VideoClock:
 
     def __init__(self, *, nominal_fps: float):
         nominal_fps = float(nominal_fps)
-        if not math.isfinite(nominal_fps) or nominal_fps <= 0.0:
+        if (
+            not math.isfinite(nominal_fps)
+            or nominal_fps <= 0.0
+            or nominal_fps > MAX_PRACTICAL_FPS
+        ):
             raise ValueError(
-                f"video fallback FPS must be finite positive, got {nominal_fps!r}"
+                "video fallback FPS must be finite positive and no greater than "
+                f"the practical maximum {MAX_PRACTICAL_FPS:g}, got {nominal_fps!r}"
             )
         self.nominal_fps = nominal_fps
         self._clock_mode = VIDEO_PENDING_MODE

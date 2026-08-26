@@ -5,14 +5,16 @@ import csv
 import json
 import math
 import re
+from bisect import bisect_left, bisect_right
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Sequence
 
 import numpy as np
 
 from recognition.realtime.knee42_controllers import SegmentEvidence
+from recognition.realtime.knee42_clock import MAX_PRACTICAL_FPS
 
 
 CSV_FIELDS = (
@@ -56,6 +58,18 @@ def frame_bounds(
     return max(0, min(total_frames, start)), max(0, min(total_frames, end))
 
 
+def timestamp_frame_bounds(
+    frame_timestamps_sec: Sequence[float],
+    clip_start_sec: float,
+    clip_end_sec: float,
+) -> tuple[int, int]:
+    """Return [left, right) bounds using exact captured-frame timestamps."""
+    return (
+        bisect_left(frame_timestamps_sec, float(clip_start_sec)),
+        bisect_right(frame_timestamps_sec, float(clip_end_sec)),
+    )
+
+
 def _safe_label(value: str) -> str:
     cleaned = re.sub(r"[^A-Za-z0-9_-]+", "_", str(value)).strip("_")
     return cleaned or "unknown"
@@ -75,12 +89,18 @@ class SegmentSessionRecorder:
         now: Callable[[], str] | None = None,
         cv2_module: Any | None = None,
     ):
-        if fps <= 0 or frame_size[0] <= 0 or frame_size[1] <= 0 or context_sec < 0:
+        fps = float(fps)
+        if not math.isfinite(fps) or fps <= 0.0 or fps > MAX_PRACTICAL_FPS:
+            raise ValueError(
+                "recording source FPS must be finite and in the practical range "
+                f"(0, {MAX_PRACTICAL_FPS:g}]"
+            )
+        if frame_size[0] <= 0 or frame_size[1] <= 0 or context_sec < 0:
             raise ValueError("invalid recording geometry or timing")
         if cv2_module is None:
             import cv2 as cv2_module
         self.cv2 = cv2_module
-        self.fps = float(fps)
+        self.fps = fps
         self.frame_size = (int(frame_size[0]), int(frame_size[1]))
         self.source_origin_sec = float(source_origin_sec)
         self.context_sec = float(context_sec)
@@ -97,6 +117,7 @@ class SegmentSessionRecorder:
         self._jsonl_handle = (self.session_dir / "segments.jsonl").open("w", encoding="utf-8")
         self._segments: list[dict[str, Any]] = []
         self._frame_count = 0
+        self._frame_timestamps_sec: list[float] = []
         self._summary: RecordingSummary | None = None
 
     @staticmethod
@@ -130,14 +151,30 @@ class SegmentSessionRecorder:
     def segment_count(self) -> int:
         return len(self._segments)
 
-    def add_frame(self, frame_bgr: np.ndarray) -> None:
+    def add_frame(
+        self,
+        frame_bgr: np.ndarray,
+        *,
+        timestamp_sec: float | None = None,
+    ) -> None:
         if self._summary is not None:
             raise RuntimeError("recording session is already stopped")
         frame = np.asarray(frame_bgr)
         expected = (self.frame_size[1], self.frame_size[0], 3)
         if frame.shape != expected:
             raise ValueError(f"expected BGR frame shape {expected}, got {frame.shape}")
+        if timestamp_sec is None:
+            timestamp_sec = self.source_origin_sec + self._frame_count / self.fps
+        timestamp_sec = float(timestamp_sec)
+        if not math.isfinite(timestamp_sec):
+            raise ValueError("recording frame timestamp must be finite")
+        if (
+            self._frame_timestamps_sec
+            and timestamp_sec < self._frame_timestamps_sec[-1]
+        ):
+            raise ValueError("recording frame timestamps must be nondecreasing")
         self._writer.write(frame)
+        self._frame_timestamps_sec.append(timestamp_sec)
         self._frame_count += 1
 
     def record_segment(self, evidence: SegmentEvidence, result: Any) -> None:
@@ -167,6 +204,7 @@ class SegmentSessionRecorder:
             "source_video": self.source_path.name,
             "exact_clip": exact_rel.as_posix(),
             "context_clip": context_rel.as_posix(),
+            "metadata_json": metadata_rel.as_posix(),
         }
         row = {
             "segment_index": index,
@@ -204,8 +242,20 @@ class SegmentSessionRecorder:
         self._csv_handle.close()
         self._jsonl_handle.close()
         for segment in self._segments:
+            segment["clock_timestamps"] = self._clock_timestamps(segment)
+            (self.session_dir / segment["metadata_json"]).write_text(
+                json.dumps(segment, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
             self._materialize(segment, context=False)
             self._materialize(segment, context=True)
+        (self.session_dir / "segments.jsonl").write_text(
+            "".join(
+                json.dumps(segment, ensure_ascii=False, separators=(",", ":")) + "\n"
+                for segment in self._segments
+            ),
+            encoding="utf-8",
+        )
         self._summary = RecordingSummary(
             session_dir=self.session_dir,
             source_path=self.source_path,
@@ -220,6 +270,7 @@ class SegmentSessionRecorder:
                     "source_origin_sec": self.source_origin_sec,
                     "source_fps": self.fps,
                     "frame_count": self._frame_count,
+                    "frame_timestamps_sec": self._frame_timestamps_sec,
                     "segment_count": len(self._segments),
                     "status": "FINALIZED",
                 },
@@ -231,14 +282,36 @@ class SegmentSessionRecorder:
         )
         return self._summary
 
+    def _clock_timestamps(self, segment: dict[str, Any]) -> dict[str, Any]:
+        exact_start, exact_end = timestamp_frame_bounds(
+            self._frame_timestamps_sec,
+            float(segment["clip_start_sec"]),
+            float(segment["clip_end_sec"]),
+        )
+        context_start, context_end = timestamp_frame_bounds(
+            self._frame_timestamps_sec,
+            float(segment["clip_start_sec"]) - self.context_sec,
+            float(segment["clip_end_sec"]) + self.context_sec,
+        )
+        return {
+            "selection_basis": "captured_frame_timestamps_sec",
+            "session_frame_timestamps_sec": list(self._frame_timestamps_sec),
+            "exact_frame_bounds": [exact_start, exact_end],
+            "exact_frame_timestamps_sec": self._frame_timestamps_sec[
+                exact_start:exact_end
+            ],
+            "context_frame_bounds": [context_start, context_end],
+            "context_frame_timestamps_sec": self._frame_timestamps_sec[
+                context_start:context_end
+            ],
+        }
+
     def _materialize(self, segment: dict[str, Any], *, context: bool) -> None:
         padding = self.context_sec if context else 0.0
-        start, end = frame_bounds(
-            self.source_origin_sec,
+        start, end = timestamp_frame_bounds(
+            self._frame_timestamps_sec,
             float(segment["clip_start_sec"]) - padding,
             float(segment["clip_end_sec"]) + padding,
-            self.fps,
-            self._frame_count,
         )
         destination = self.session_dir / (
             segment["context_clip"] if context else segment["exact_clip"]

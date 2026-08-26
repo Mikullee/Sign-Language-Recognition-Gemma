@@ -162,6 +162,67 @@ class FakeDetectorContext:
         return False
 
 
+class PacketSequenceSource:
+    status = "video:sequence.mp4"
+    fps = 30.0
+    clock_mode = "video_source_timestamp"
+
+    def __init__(self, timestamps):
+        frame = np.zeros((4, 6, 3), dtype=np.uint8)
+        self._packets = [
+            SimpleNamespace(
+                frame=frame.copy(),
+                timestamp_sec=float(timestamp),
+                clock_mode=self.clock_mode,
+            )
+            for timestamp in timestamps
+        ]
+        self.released = False
+
+    def read_packet(self):
+        return self._packets.pop(0) if self._packets else None
+
+    def release(self):
+        self.released = True
+
+
+class ValueRuntimeBundle:
+    sequence_length = 64
+    frame_step = 2
+    model_display_version = "test"
+
+    def __init__(self, root):
+        self.root = root
+
+    def predict(self, values, _mask):
+        label_index = int(round(float(values[-1, 0]))) + 1
+        prediction = Prediction(f"K42_{label_index:02d}", "test", 1.0)
+        return InferenceResult(top1=prediction, top3=(prediction,))
+
+
+class ValueDetectors:
+    def __init__(self):
+        self.calls = 0
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+    def extract_observation(self, _frame):
+        value = float(self.calls)
+        self.calls += 1
+        return SimpleNamespace(
+            display_pose=None,
+            display_left_hand=None,
+            display_right_hand=None,
+            recognition_values=np.full(219, value, dtype=np.float32),
+            recognition_mask=np.ones(219, dtype=np.bool_),
+            trigger_values=np.ones(225, dtype=np.float32),
+        )
+
+
 class RuntimeTests(unittest.TestCase):
     def test_bundle_rejects_non_weight_checkpoint_payload(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -240,9 +301,14 @@ class RuntimeTests(unittest.TestCase):
         self.assertNotIn("controller.add_held_observation(", source)
         self.assertNotIn("frame_interval_sec", source)
 
+    def test_held_observation_batch_rejects_unbounded_sample_count(self):
+        with self.assertRaisesRegex(ValueError, "bound|at most"):
+            knee42_ivcam.HeldObservationBatch(65)
+
     def test_runtime_buffers_exact_packet_times_for_held_observations(self):
         held_calls = []
         recorder_origins = []
+        recorder_timestamps = []
 
         class PacketOnlySource:
             status = "video:irregular.mp4"
@@ -327,7 +393,8 @@ class RuntimeTests(unittest.TestCase):
                 recorder_origins.append(kwargs["source_origin_sec"])
                 self.frame_count = 0
 
-            def add_frame(self, _frame):
+            def add_frame(self, _frame, *, timestamp_sec):
+                recorder_timestamps.append(timestamp_sec)
                 self.frame_count += 1
 
             def record_segment(self, _segment, _result):
@@ -376,9 +443,633 @@ class RuntimeTests(unittest.TestCase):
             ],
         )
         self.assertEqual(recorder_origins, [0.0])
+        self.assertEqual(recorder_timestamps, [0.0, 0.033, 0.071])
         self.assertEqual(result["raw_frames"], 3)
         self.assertEqual(result["feature_frames"], 2)
         self.assertEqual(result["clock_mode"], "video_source_timestamp")
+        self.assertEqual(result["first_frame_timestamp_sec"], 0.0)
+        self.assertEqual(result["last_frame_timestamp_sec"], 0.071)
+        self.assertTrue(packet_source.released)
+
+    def test_reset_drops_held_observation_and_prevents_future_timestamp_ownership(self):
+        held_calls = []
+
+        class PacketSource:
+            status = "video:reset.mp4"
+            fps = 30.0
+            clock_mode = "video_source_timestamp"
+
+            def __init__(self):
+                frame = np.zeros((4, 6, 3), dtype=np.uint8)
+                self._packets = [
+                    SimpleNamespace(
+                        frame=frame.copy(),
+                        timestamp_sec=timestamp,
+                        clock_mode=self.clock_mode,
+                    )
+                    for timestamp in (0.0, 0.033, 0.066, 0.100)
+                ]
+                self.released = False
+
+            def read_packet(self):
+                return self._packets.pop(0) if self._packets else None
+
+            def release(self):
+                self.released = True
+
+        class FakeBundle:
+            sequence_length = 64
+            frame_step = 2
+            model_display_version = "test"
+
+            def __init__(self, root):
+                self.root = root
+
+            def predict(self, _values, _mask):
+                predictions = (
+                    Prediction("K42_01", "你好", 0.8),
+                    Prediction("K42_02", "謝謝", 0.1),
+                    Prediction("K42_03", "再見", 0.1),
+                )
+                return InferenceResult(top1=predictions[0], top3=predictions)
+
+        class FakeAutoController:
+            def __init__(self, _config, *, initial_mode):
+                self.mode = initial_mode
+                self.state = "WAITING"
+                self.calibrated = True
+
+            def add_held_observation_at_times(self, timestamps_sec, _trigger, feature):
+                held_calls.append((tuple(timestamps_sec), float(feature[0][0])))
+                return SimpleNamespace(infer=True, features=(feature,), segment=None)
+
+            def finalize_video_eof(self):
+                return SimpleNamespace(infer=False, features=(), segment=None)
+
+            def reset(self):
+                return SimpleNamespace(infer=False, features=(), segment=None)
+
+        class FakeDetectors:
+            def __init__(self):
+                self.calls = 0
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def extract_observation(self, _frame):
+                detector_value = float(self.calls)
+                self.calls += 1
+                return SimpleNamespace(
+                    display_pose=None,
+                    display_left_hand=None,
+                    display_right_hand=None,
+                    recognition_values=np.full(219, detector_value, dtype=np.float32),
+                    recognition_mask=np.ones(219, dtype=np.bool_),
+                    trigger_values=np.ones(225, dtype=np.float32),
+                )
+
+        class FakeDisplay:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def create(self, _cv2):
+                return None
+
+            def content_size(self, _cv2):
+                return (6, 4)
+
+            def toggle_fullscreen(self, _cv2):
+                return False
+
+        packet_source = PacketSource()
+        keys = iter((ord("r"), -1, -1, -1))
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            bundle_root = root / "model"
+            bundle_root.mkdir()
+            (root / "auto_trigger_knee_ivcam_local.json").write_text(
+                "{}", encoding="utf-8"
+            )
+            with (
+                mock.patch.object(knee42_ivcam, "verify_auto_trigger_provenance"),
+                mock.patch.object(
+                    knee42_ivcam,
+                    "load_bundle",
+                    return_value=FakeBundle(bundle_root),
+                ),
+                mock.patch.object(knee42_ivcam, "open_video", return_value=packet_source),
+                mock.patch.object(
+                    knee42_ivcam,
+                    "load_auto_trigger_config",
+                    return_value=object(),
+                ),
+                mock.patch.object(
+                    knee42_ivcam,
+                    "AutoKnee42Controller",
+                    FakeAutoController,
+                ),
+                mock.patch.object(
+                    knee42_ivcam,
+                    "create_mediapipe_detectors",
+                    return_value=FakeDetectors(),
+                ),
+                mock.patch.object(knee42_ivcam, "ResizableDisplay", FakeDisplay),
+                mock.patch.object(
+                    knee42_ivcam,
+                    "render_application_view",
+                    side_effect=lambda frame, *_args, **_kwargs: (frame, None),
+                ),
+                mock.patch("cv2.imshow"),
+                mock.patch("cv2.waitKey", side_effect=lambda _delay: next(keys)),
+                mock.patch("cv2.destroyAllWindows"),
+            ):
+                knee42_ivcam.run_capture(
+                    bundle_root,
+                    mode="auto",
+                    camera_index=None,
+                    video=Path("reset.mp4"),
+                    device=torch.device("cpu"),
+                    headless=False,
+                    max_frames=None,
+                )
+
+        self.assertEqual(held_calls, [((0.066, 0.100), 1.0)])
+        self.assertTrue(packet_source.released)
+
+    def test_source_is_released_when_trigger_config_is_missing_after_open(self):
+        source = SimpleNamespace(released=False)
+        source.release = lambda: setattr(source, "released", True)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            bundle_root = Path(temp_dir) / "model"
+            bundle_root.mkdir()
+            bundle = SimpleNamespace(root=bundle_root, frame_step=2)
+            with (
+                mock.patch.object(knee42_ivcam, "verify_auto_trigger_provenance"),
+                mock.patch.object(knee42_ivcam, "load_bundle", return_value=bundle),
+                mock.patch.object(knee42_ivcam, "open_video", return_value=source),
+            ):
+                with self.assertRaisesRegex(IntegrityError, "config missing"):
+                    knee42_ivcam.run_capture(
+                        bundle_root,
+                        mode="auto",
+                        camera_index=None,
+                        video=Path("missing-config.mp4"),
+                        device=torch.device("cpu"),
+                        headless=True,
+                        max_frames=1,
+                    )
+
+        self.assertTrue(source.released)
+
+    def test_source_is_released_when_controller_creation_fails_after_open(self):
+        source = SimpleNamespace(released=False)
+        source.release = lambda: setattr(source, "released", True)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            bundle_root = root / "model"
+            bundle_root.mkdir()
+            (root / "auto_trigger_knee_ivcam_local.json").write_text(
+                "{}", encoding="utf-8"
+            )
+            bundle = SimpleNamespace(root=bundle_root)
+            with (
+                mock.patch.object(knee42_ivcam, "verify_auto_trigger_provenance"),
+                mock.patch.object(knee42_ivcam, "load_bundle", return_value=bundle),
+                mock.patch.object(knee42_ivcam, "open_video", return_value=source),
+                mock.patch.object(
+                    knee42_ivcam,
+                    "load_auto_trigger_config",
+                    return_value=object(),
+                ),
+                mock.patch.object(
+                    knee42_ivcam,
+                    "AutoKnee42Controller",
+                    side_effect=RuntimeError("controller creation failed"),
+                ),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "controller creation failed"):
+                    knee42_ivcam.run_capture(
+                        bundle_root,
+                        mode="auto",
+                        camera_index=None,
+                        video=Path("controller.mp4"),
+                        device=torch.device("cpu"),
+                        headless=True,
+                        max_frames=1,
+                    )
+
+        self.assertTrue(source.released)
+
+    def test_source_and_window_are_cleaned_when_display_creation_fails(self):
+        source = SimpleNamespace(released=False)
+        source.release = lambda: setattr(source, "released", True)
+
+        class FakeAutoController:
+            def __init__(self, _config, *, initial_mode):
+                self.mode = initial_mode
+
+        class FailingDisplay:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def create(self, _cv2):
+                raise RuntimeError("display creation failed")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            bundle_root = root / "model"
+            bundle_root.mkdir()
+            (root / "auto_trigger_knee_ivcam_local.json").write_text(
+                "{}", encoding="utf-8"
+            )
+            bundle = SimpleNamespace(root=bundle_root, frame_step=2)
+            with (
+                mock.patch.object(knee42_ivcam, "verify_auto_trigger_provenance"),
+                mock.patch.object(knee42_ivcam, "load_bundle", return_value=bundle),
+                mock.patch.object(knee42_ivcam, "open_video", return_value=source),
+                mock.patch.object(
+                    knee42_ivcam,
+                    "load_auto_trigger_config",
+                    return_value=object(),
+                ),
+                mock.patch.object(
+                    knee42_ivcam,
+                    "AutoKnee42Controller",
+                    FakeAutoController,
+                ),
+                mock.patch.object(knee42_ivcam, "ResizableDisplay", FailingDisplay),
+                mock.patch("cv2.destroyAllWindows") as destroy_windows,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "display creation failed"):
+                    knee42_ivcam.run_capture(
+                        bundle_root,
+                        mode="auto",
+                        camera_index=None,
+                        video=Path("display.mp4"),
+                        device=torch.device("cpu"),
+                        headless=False,
+                        max_frames=1,
+                    )
+
+        self.assertTrue(source.released)
+        destroy_windows.assert_called_once_with()
+
+    def test_pose_detector_enter_failure_closes_the_entered_hand_detector(self):
+        from mediapipe.tasks.python.vision.hand_landmarker import HandLandmarker
+        from mediapipe.tasks.python.vision.pose_landmarker import PoseLandmarker
+
+        class HandContext:
+            closed = False
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                self.closed = True
+                return False
+
+        class PoseContext:
+            def __enter__(self):
+                raise RuntimeError("pose enter failed")
+
+            def __exit__(self, *_args):
+                return False
+
+        hand_context = HandContext()
+        detectors = knee42_ivcam.MediapipeDetectors(
+            SimpleNamespace(root=Path("bundle"))
+        )
+        with (
+            mock.patch.object(
+                HandLandmarker,
+                "create_from_options",
+                return_value=hand_context,
+            ),
+            mock.patch.object(
+                PoseLandmarker,
+                "create_from_options",
+                return_value=PoseContext(),
+            ),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "pose enter failed"):
+                detectors.__enter__()
+
+        self.assertTrue(hand_context.closed)
+
+    def test_recorder_stop_failure_cannot_skip_other_runtime_cleanup(self):
+        class PacketSource:
+            status = "video:cleanup.mp4"
+            fps = 30.0
+            clock_mode = "video_source_timestamp"
+
+            def __init__(self):
+                frame = np.zeros((4, 6, 3), dtype=np.uint8)
+                self._packets = [
+                    SimpleNamespace(
+                        frame=frame.copy(),
+                        timestamp_sec=timestamp,
+                        clock_mode=self.clock_mode,
+                    )
+                    for timestamp in (0.0, 0.04)
+                ]
+                self.released = False
+
+            def read_packet(self):
+                return self._packets.pop(0) if self._packets else None
+
+            def release(self):
+                self.released = True
+
+        class FakeBundle:
+            sequence_length = 64
+            frame_step = 2
+            model_display_version = "test"
+
+            def __init__(self, root):
+                self.root = root
+
+            def predict(self, _values, _mask):
+                prediction = Prediction("K42_01", "你好", 1.0)
+                return InferenceResult(top1=prediction, top3=(prediction,))
+
+        class FakeAutoController:
+            def __init__(self, _config, *, initial_mode):
+                self.mode = initial_mode
+                self.state = "WAITING"
+                self.calibrated = True
+
+            def add_held_observation_at_times(self, _timestamps, _trigger, feature):
+                return SimpleNamespace(infer=True, features=(feature,), segment=None)
+
+            def reset(self):
+                return None
+
+        class FakeDetectors:
+            exited = False
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                self.exited = True
+                return False
+
+            def extract_observation(self, _frame):
+                return SimpleNamespace(
+                    display_pose=None,
+                    display_left_hand=None,
+                    display_right_hand=None,
+                    recognition_values=np.zeros(219, dtype=np.float32),
+                    recognition_mask=np.ones(219, dtype=np.bool_),
+                    trigger_values=np.ones(225, dtype=np.float32),
+                )
+
+        class FailingRecorder:
+            segment_count = 0
+
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def add_frame(self, _frame, *, timestamp_sec):
+                return None
+
+            def record_segment(self, _segment, _result):
+                return None
+
+            def stop(self):
+                raise RuntimeError("recorder stop failed")
+
+        class FakeDisplay:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def create(self, _cv2):
+                return None
+
+            def content_size(self, _cv2):
+                return (6, 4)
+
+        packet_source = PacketSource()
+        detectors = FakeDetectors()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            bundle_root = root / "model"
+            bundle_root.mkdir()
+            (root / "auto_trigger_knee_ivcam_local.json").write_text(
+                "{}", encoding="utf-8"
+            )
+            with (
+                mock.patch.object(knee42_ivcam, "verify_auto_trigger_provenance"),
+                mock.patch.object(
+                    knee42_ivcam,
+                    "load_bundle",
+                    return_value=FakeBundle(bundle_root),
+                ),
+                mock.patch.object(knee42_ivcam, "open_video", return_value=packet_source),
+                mock.patch.object(
+                    knee42_ivcam,
+                    "load_auto_trigger_config",
+                    return_value=object(),
+                ),
+                mock.patch.object(
+                    knee42_ivcam,
+                    "AutoKnee42Controller",
+                    FakeAutoController,
+                ),
+                mock.patch.object(
+                    knee42_ivcam,
+                    "create_mediapipe_detectors",
+                    return_value=detectors,
+                ),
+                mock.patch.object(
+                    knee42_ivcam,
+                    "SegmentSessionRecorder",
+                    FailingRecorder,
+                ),
+                mock.patch.object(knee42_ivcam, "ResizableDisplay", FakeDisplay),
+                mock.patch.object(
+                    knee42_ivcam,
+                    "render_application_view",
+                    side_effect=lambda frame, *_args, **_kwargs: (frame, None),
+                ),
+                mock.patch("cv2.imshow"),
+                mock.patch("cv2.waitKey", return_value=-1),
+                mock.patch("cv2.destroyAllWindows") as destroy_windows,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "recorder stop failed"):
+                    knee42_ivcam.run_capture(
+                        bundle_root,
+                        mode="auto",
+                        camera_index=None,
+                        video=Path("cleanup.mp4"),
+                        device=torch.device("cpu"),
+                        headless=False,
+                        max_frames=2,
+                        start_logging=True,
+                    )
+
+        self.assertTrue(packet_source.released)
+        self.assertTrue(detectors.exited)
+        destroy_windows.assert_called_once_with()
+
+    def test_max_frames_truncation_drops_pending_batch_without_eof_finalization(self):
+        held_calls = []
+        finalize_calls = []
+
+        class TruncationController:
+            def __init__(self, _config, *, initial_mode):
+                self.mode = initial_mode
+                self.state = "END_CONFIRM"
+                self.calibrated = True
+                self._feature = None
+
+            def add_held_observation_at_times(self, timestamps, _trigger, feature):
+                held_calls.append(tuple(timestamps))
+                self._feature = feature
+                return SimpleNamespace(infer=False, features=(), segment=None)
+
+            def finalize_video_eof(self):
+                finalize_calls.append(True)
+                return SimpleNamespace(
+                    infer=True,
+                    features=(self._feature,),
+                    segment=None,
+                )
+
+            def reset(self):
+                return None
+
+        packet_source = PacketSequenceSource((0.0, 0.04, 0.08))
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            bundle_root = root / "model"
+            bundle_root.mkdir()
+            (root / "auto_trigger_knee_ivcam_local.json").write_text(
+                "{}", encoding="utf-8"
+            )
+            with (
+                mock.patch.object(knee42_ivcam, "verify_auto_trigger_provenance"),
+                mock.patch.object(
+                    knee42_ivcam,
+                    "load_bundle",
+                    return_value=ValueRuntimeBundle(bundle_root),
+                ),
+                mock.patch.object(knee42_ivcam, "open_video", return_value=packet_source),
+                mock.patch.object(
+                    knee42_ivcam,
+                    "load_auto_trigger_config",
+                    return_value=object(),
+                ),
+                mock.patch.object(
+                    knee42_ivcam,
+                    "AutoKnee42Controller",
+                    TruncationController,
+                ),
+                mock.patch.object(
+                    knee42_ivcam,
+                    "create_mediapipe_detectors",
+                    return_value=ValueDetectors(),
+                ),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "without an inference result"):
+                    knee42_ivcam.run_capture(
+                        bundle_root,
+                        mode="auto",
+                        camera_index=None,
+                        video=Path("truncated.mp4"),
+                        device=torch.device("cpu"),
+                        headless=True,
+                        max_frames=1,
+                    )
+
+        self.assertEqual(held_calls, [])
+        self.assertEqual(finalize_calls, [])
+        self.assertTrue(packet_source.released)
+
+    def test_natural_eof_flushes_pending_batch_and_finalizes_after_earlier_result(self):
+        held_calls = []
+        finalize_calls = []
+
+        class NaturalEofController:
+            def __init__(self, _config, *, initial_mode):
+                self.mode = initial_mode
+                self.state = "END_CONFIRM"
+                self.calibrated = True
+                self._latest_feature = None
+
+            def add_held_observation_at_times(self, timestamps, _trigger, feature):
+                held_calls.append((tuple(timestamps), float(feature[0][0])))
+                self._latest_feature = feature
+                return SimpleNamespace(
+                    infer=len(held_calls) == 1,
+                    features=(feature,),
+                    segment=None,
+                )
+
+            def finalize_video_eof(self):
+                finalize_calls.append(True)
+                return SimpleNamespace(
+                    infer=True,
+                    features=(self._latest_feature,),
+                    segment=None,
+                )
+
+            def reset(self):
+                return None
+
+        packet_source = PacketSequenceSource((0.0, 0.04, 0.08))
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            bundle_root = root / "model"
+            bundle_root.mkdir()
+            (root / "auto_trigger_knee_ivcam_local.json").write_text(
+                "{}", encoding="utf-8"
+            )
+            with (
+                mock.patch.object(knee42_ivcam, "verify_auto_trigger_provenance"),
+                mock.patch.object(
+                    knee42_ivcam,
+                    "load_bundle",
+                    return_value=ValueRuntimeBundle(bundle_root),
+                ),
+                mock.patch.object(knee42_ivcam, "open_video", return_value=packet_source),
+                mock.patch.object(
+                    knee42_ivcam,
+                    "load_auto_trigger_config",
+                    return_value=object(),
+                ),
+                mock.patch.object(
+                    knee42_ivcam,
+                    "AutoKnee42Controller",
+                    NaturalEofController,
+                ),
+                mock.patch.object(
+                    knee42_ivcam,
+                    "create_mediapipe_detectors",
+                    return_value=ValueDetectors(),
+                ),
+            ):
+                result = knee42_ivcam.run_capture(
+                    bundle_root,
+                    mode="auto",
+                    camera_index=None,
+                    video=Path("natural-eof.mp4"),
+                    device=torch.device("cpu"),
+                    headless=True,
+                    max_frames=None,
+                )
+
+        self.assertEqual(
+            held_calls,
+            [((0.0, 0.04), 0.0), ((0.08,), 1.0)],
+        )
+        self.assertEqual(finalize_calls, [True])
+        self.assertEqual(result["top1"], "K42_02")
         self.assertTrue(packet_source.released)
 
     def test_auto_trigger_provenance_rejects_source_tampering(self):

@@ -7,6 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
+from unittest import mock
 
 from recognition.realtime.auto_trigger import AutoFrameAnalysis, AutoTriggerConfig
 from recognition.realtime.knee42_controllers import AutoKnee42Controller
@@ -16,7 +17,7 @@ from recognition.realtime.knee42_preprocessing import observation_from_results
 ROOT = Path(__file__).resolve().parents[1]
 TEMPLATE = ROOT / "packaging" / "knee42_ivcam"
 ARCHIVED_TRIGGER_SHA256 = "0092136a14a859c7a11aa0e5df9d0920a37471e8da09718828eb773d00d6fdc7"
-ARCHIVED_CONTROLLER_SHA256 = "969f164356fa0abb532d924e08714bca781cba2eb0fc0fef658f577f8e9ec12b"
+ARCHIVED_CONTROLLER_SHA256 = "23b0f0d458e7313140d5841dc603d103484f742ef36d0e4a387f00970d422056"
 ARCHIVED_CONFIG_SHA256 = "d21f64f4f45f343964a532c5525ff5a4ce5669c9dcbc288cc7b65ccdf62ef728"
 ARCHIVED_ZIP_SHA256 = "d31da3a2075321304cc595657417bf810eb52ee83ff5057a09aec9a2218f4f3c"
 
@@ -209,6 +210,68 @@ class AutoKnee42ControllerTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "monotonic"):
             controller.add_observation(0.9, trigger, ("two", "two"))
 
+    def test_equal_and_implausibly_tiny_timestamps_are_rejected_before_engine_update(self):
+        controller = AutoKnee42Controller(
+            AutoTriggerConfig(reference_rest_enabled=False),
+            analysis_fn=frame_analysis,
+        )
+        trigger = np.zeros(225, dtype=np.float32)
+        controller.add_observation(1.0, trigger, ("first", "first"))
+
+        for timestamp_sec in (1.0, 1.0 + 1e-12):
+            with self.subTest(timestamp_sec=timestamp_sec):
+                with self.assertRaisesRegex(ValueError, "strict|cadence"):
+                    controller.add_observation(
+                        timestamp_sec,
+                        trigger,
+                        ("invalid", "invalid"),
+                    )
+
+        self.assertEqual(controller.sample_timestamps, (1.0,))
+        self.assertEqual(len(controller.engine._pre_roll), 1)
+
+    def test_ten_thousand_equal_or_tiny_observations_cannot_grow_buffers(self):
+        controller = AutoKnee42Controller(
+            AutoTriggerConfig(reference_rest_enabled=False),
+            analysis_fn=frame_analysis,
+        )
+        trigger = np.zeros(225, dtype=np.float32)
+        controller.add_observation(1.0, trigger, ("first", "first"))
+
+        for index in range(10_000):
+            timestamp_sec = 1.0 if index % 2 == 0 else 1.0 + 1e-12
+            with self.assertRaises(ValueError):
+                controller.add_observation(
+                    timestamp_sec,
+                    trigger,
+                    ("invalid", "invalid"),
+                )
+
+        self.assertEqual(controller.buffered_observations, 1)
+        self.assertEqual(len(controller._features), 1)
+        self.assertEqual(len(controller.engine._pre_roll), 1)
+        self.assertEqual(len(controller.engine.segment_samples), 0)
+
+    def test_controller_buffer_has_a_hard_count_bound_beyond_time_horizon(self):
+        controller = AutoKnee42Controller(
+            AutoTriggerConfig(
+                max_segment_sec=1000.0,
+                reference_rest_enabled=False,
+            ),
+            analysis_fn=frame_analysis,
+        )
+        trigger = np.zeros(225, dtype=np.float32)
+
+        for index in range(5000):
+            controller.add_observation(
+                index * 0.01,
+                trigger,
+                (f"values-{index}", f"mask-{index}"),
+            )
+
+        self.assertLessEqual(controller.buffered_observations, 4096)
+        self.assertLessEqual(len(controller._features), 4096)
+
     def test_direct_observation_rejects_nonfinite_timestamp(self):
         trigger = np.zeros(225, dtype=np.float32)
 
@@ -292,6 +355,38 @@ class AutoKnee42ControllerTests(unittest.TestCase):
         self.assertFalse(event.infer)
         self.assertEqual(controller.state, "SIGNING_ACTIVE")
 
+    def test_video_eof_rejects_implausibly_tiny_compatibility_interval(self):
+        controller = AutoKnee42Controller(
+            AutoTriggerConfig(reference_rest_enabled=False),
+            analysis_fn=frame_analysis,
+        )
+
+        with self.assertRaisesRegex(ValueError, "cadence|practical"):
+            controller.finalize_video_eof(frame_interval_sec=1e-12)
+
+    def test_video_eof_synthetic_completion_has_a_hard_sample_bound(self):
+        controller = AutoKnee42Controller(
+            AutoTriggerConfig(
+                end_hold_sec=1000.0,
+                reference_rest_enabled=False,
+            ),
+            analysis_fn=frame_analysis,
+        )
+        controller.engine.state = "END_CONFIRM"
+        controller._last_timestamp = 0.1
+        controller._last_rest_trigger = np.zeros(225, dtype=np.float32)
+        controller._last_rest_feature = ("rest", "rest")
+        controller._timestamps.extend((0.0, 0.1))
+
+        with mock.patch.object(
+            controller,
+            "add_observation",
+            return_value=SimpleNamespace(infer=False),
+        ) as add_observation:
+            controller.finalize_video_eof()
+
+        self.assertLessEqual(add_observation.call_count, 256)
+
     def test_held_trigger_samples_preserve_30hz_timing_with_frame_step_two(self):
         controller = AutoKnee42Controller(
             AutoTriggerConfig(
@@ -321,6 +416,21 @@ class AutoKnee42ControllerTests(unittest.TestCase):
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0].message, "visible_rest_finalize")
 
+    def test_compatibility_held_observation_rejects_unbounded_sample_count(self):
+        controller = AutoKnee42Controller(
+            AutoTriggerConfig(reference_rest_enabled=False),
+            analysis_fn=frame_analysis,
+        )
+
+        with self.assertRaisesRegex(ValueError, "bound|at most"):
+            controller.add_held_observation(
+                0.0,
+                np.zeros(225, dtype=np.float32),
+                ("values", "mask"),
+                frame_interval_sec=0.01,
+                sample_count=257,
+            )
+
     def test_held_samples_use_exact_irregular_collected_timestamps(self):
         controller = AutoKnee42Controller(
             AutoTriggerConfig(
@@ -344,6 +454,8 @@ class AutoKnee42ControllerTests(unittest.TestCase):
             ([], "empty"),
             ([0.033, float("nan")], "finite"),
             ([0.071, 0.033], "monotonic"),
+            ([0.033, 0.033], "strict"),
+            ([0.033, 0.033 + 1e-12], "cadence"),
         )
 
         for timestamps, message in invalid_sequences:

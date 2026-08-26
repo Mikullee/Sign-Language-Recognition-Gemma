@@ -1,13 +1,22 @@
 """RGB-only OpenCV camera and video sources for the Knee42 Windows tester."""
 from __future__ import annotations
 
+import math
 import sys
 from pathlib import Path
 from typing import Any, Callable
 
 import numpy as np
 
-from recognition.realtime.knee42_clock import FramePacket, LiveClock, VideoClock
+from recognition.realtime.knee42_clock import (
+    MAX_PRACTICAL_FPS,
+    FramePacket,
+    LiveClock,
+    VideoClock,
+)
+
+
+DEFAULT_CAMERA_FPS = 30.0
 
 
 def apply_video_transform(
@@ -64,8 +73,15 @@ class OpenCVFrameSource:
 
     @property
     def fps(self) -> float:
-        value = float(self._capture.get(self._cv2.CAP_PROP_FPS))
-        return value if value > 0 else 0.0
+        try:
+            value = float(self._capture.get(self._cv2.CAP_PROP_FPS))
+        except (TypeError, ValueError):
+            value = float("nan")
+        if math.isfinite(value) and 0.0 < value <= MAX_PRACTICAL_FPS:
+            return value
+        if isinstance(self._clock, LiveClock):
+            return DEFAULT_CAMERA_FPS
+        return self._clock.nominal_fps
 
     @property
     def clock_mode(self) -> str:

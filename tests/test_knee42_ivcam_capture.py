@@ -51,13 +51,17 @@ class FakeCv2:
         self,
         opened_indices=(),
         camera_frames=None,
+        camera_fps=30.0,
         video_frames=None,
         video_pos_msec=None,
+        video_fps=25.0,
     ):
         self.opened_indices = set(opened_indices)
         self.camera_frames = list(camera_frames or [])
+        self.camera_fps = camera_fps
         self.video_frames = list(video_frames or [])
         self.video_pos_msec = list(video_pos_msec or [])
+        self.video_fps = video_fps
         self.calls = []
         self.captures = []
 
@@ -65,12 +69,16 @@ class FakeCv2:
         self.calls.append((source, *backend))
         if isinstance(source, int):
             frames = self.camera_frames or [f"camera-{source}"]
-            capture = FakeCapture(source in self.opened_indices, frames=frames)
+            capture = FakeCapture(
+                source in self.opened_indices,
+                frames=frames,
+                fps=self.camera_fps,
+            )
         else:
             capture = FakeCapture(
                 bool(self.video_frames),
                 frames=self.video_frames,
-                fps=25.0,
+                fps=self.video_fps,
                 pos_msec=self.video_pos_msec,
             )
         self.captures.append(capture)
@@ -125,6 +133,22 @@ class CaptureTests(unittest.TestCase):
         self.assertTrue(all(packet.clock_mode == "live_perf_counter" for packet in packets))
         self.assertEqual(source.clock_mode, "live_perf_counter")
 
+    def test_invalid_camera_reported_fps_falls_back_to_practical_default(self):
+        for reported_fps in (0.0, -1.0, float("nan"), float("inf"), 240.0001):
+            with self.subTest(reported_fps=reported_fps):
+                fake_cv2 = FakeCv2(
+                    opened_indices={0},
+                    camera_fps=reported_fps,
+                )
+                source = open_camera(
+                    0,
+                    cv2_module=fake_cv2,
+                    platform_name="win32",
+                )
+
+                self.assertEqual(source.fps, 30.0)
+                source.release()
+
     def test_no_camera_releases_every_probe_and_fails(self):
         fake_cv2 = FakeCv2()
 
@@ -148,6 +172,20 @@ class CaptureTests(unittest.TestCase):
             self.assertEqual(source.read(), (True, "frame-a"))
             source.release()
             self.assertTrue(fake_cv2.captures[0].released)
+
+    def test_video_fps_above_practical_limit_is_rejected_and_released(self):
+        fake_cv2 = FakeCv2(
+            video_frames=["frame-a"],
+            video_fps=240.0001,
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "too-fast.avi"
+            path.write_bytes(b"fixture")
+
+            with self.assertRaisesRegex(ValueError, "240|practical"):
+                open_video(path, cv2_module=fake_cv2)
+
+        self.assertTrue(fake_cv2.captures[0].released)
 
     def test_video_packets_preserve_vfr_pos_msec_timestamps(self):
         fake_cv2 = FakeCv2(

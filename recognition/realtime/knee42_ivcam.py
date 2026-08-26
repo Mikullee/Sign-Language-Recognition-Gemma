@@ -391,9 +391,14 @@ class MediapipeDetectors:
             base_options=BaseOptions(model_asset_path=str(self.bundle.root / "pose_landmarker.task")),
             running_mode=VisionTaskRunningMode.IMAGE,
         )
-        self._stack = ExitStack()
-        self._hands = self._stack.enter_context(HandLandmarker.create_from_options(hand_options))
-        self._pose = self._stack.enter_context(PoseLandmarker.create_from_options(pose_options))
+        with ExitStack() as stack:
+            hands = stack.enter_context(
+                HandLandmarker.create_from_options(hand_options)
+            )
+            pose = stack.enter_context(PoseLandmarker.create_from_options(pose_options))
+            self._stack = stack.pop_all()
+        self._hands = hands
+        self._pose = pose
         self._mp = mp
         return self
 
@@ -469,6 +474,67 @@ def _predict_features(bundle: Knee42Bundle, features: Sequence[tuple[np.ndarray,
     return bundle.predict(values, mask)
 
 
+MAX_HELD_BATCH_SAMPLES = 64
+
+
+class HeldObservationBatch:
+    """Own one detector observation and only its forward packet timestamps."""
+
+    def __init__(self, sample_count: int):
+        sample_count = int(sample_count)
+        if sample_count <= 0 or sample_count > MAX_HELD_BATCH_SAMPLES:
+            raise ValueError(
+                "held observation sample_count must be positive and at most the "
+                f"bounded maximum {MAX_HELD_BATCH_SAMPLES}"
+            )
+        self.sample_count = sample_count
+        self._observation: tuple[
+            np.ndarray,
+            tuple[np.ndarray, np.ndarray],
+        ] | None = None
+        self._timestamps: list[float] = []
+
+    @property
+    def active(self) -> bool:
+        return self._observation is not None
+
+    @property
+    def ready(self) -> bool:
+        return self.active and len(self._timestamps) >= self.sample_count
+
+    def start(
+        self,
+        timestamp_sec: float,
+        trigger_values: np.ndarray,
+        feature: tuple[np.ndarray, np.ndarray],
+    ) -> None:
+        if self.active:
+            raise RuntimeError("held observation batch is still active")
+        self._observation = (trigger_values, feature)
+        self._timestamps = [float(timestamp_sec)]
+
+    def append(self, timestamp_sec: float) -> None:
+        if not self.active:
+            return
+        if len(self._timestamps) >= self.sample_count:
+            raise RuntimeError("held observation batch exceeded its sample bound")
+        self._timestamps.append(float(timestamp_sec))
+
+    def take(
+        self,
+    ) -> tuple[tuple[float, ...], np.ndarray, tuple[np.ndarray, np.ndarray]] | None:
+        if self._observation is None or not self._timestamps:
+            return None
+        trigger_values, feature = self._observation
+        timestamps = tuple(self._timestamps)
+        self.clear()
+        return timestamps, trigger_values, feature
+
+    def clear(self) -> None:
+        self._observation = None
+        self._timestamps.clear()
+
+
 def run_capture(
     bundle_dir: Path,
     *,
@@ -492,30 +558,39 @@ def run_capture(
         max_index=max_camera_index,
         cv2_module=cv2,
     )
-    if mode in {"auto", "manual"}:
-        trigger_config_path = bundle.root.parent / "auto_trigger_knee_ivcam_local.json"
-        if not trigger_config_path.is_file():
-            raise IntegrityError(f"auto-trigger config missing: {trigger_config_path}")
-        controller: AutoKnee42Controller | SlidingController = AutoKnee42Controller(
-            load_auto_trigger_config(trigger_config_path),
-            initial_mode=mode,
-        )
-    else:
-        controller = SlidingController(
-            window=bundle.sequence_length,
-            inference_stride=inference_stride,
-        )
-    if headless and video is not None and isinstance(controller, AutoKnee42Controller) and controller.mode == "manual":
-        controller.on_space()
+    cleanup_stack = ExitStack()
+    cleanup_stack.callback(source.release)
+    try:
+        if mode in {"auto", "manual"}:
+            trigger_config_path = bundle.root.parent / "auto_trigger_knee_ivcam_local.json"
+            if not trigger_config_path.is_file():
+                raise IntegrityError(f"auto-trigger config missing: {trigger_config_path}")
+            controller: AutoKnee42Controller | SlidingController = AutoKnee42Controller(
+                load_auto_trigger_config(trigger_config_path),
+                initial_mode=mode,
+            )
+        else:
+            controller = SlidingController(
+                window=bundle.sequence_length,
+                inference_stride=inference_stride,
+            )
+        if (
+            headless
+            and video is not None
+            and isinstance(controller, AutoKnee42Controller)
+            and controller.mode == "manual"
+        ):
+            controller.on_space()
+    except BaseException as exc:
+        cleanup_stack.__exit__(type(exc), exc, exc.__traceback__)
+        raise
+
     last_result: InferenceResult | None = None
     raw_frames = 0
     feature_frames = 0
-    pending_packet_timestamps: list[float] = []
-    pending_auto_observation: tuple[
-        np.ndarray,
-        tuple[np.ndarray, np.ndarray],
-    ] | None = None
-    started = time.perf_counter()
+    observed_packet_eof = False
+    first_frame_timestamp_sec: float | None = None
+    last_frame_timestamp_sec: float | None = None
     recorder: SegmentSessionRecorder | None = None
     recording_requested = bool(start_logging)
     last_recording_summary = None
@@ -523,13 +598,20 @@ def run_capture(
     latest_display_left_hand: np.ndarray | None = None
     latest_display_right_hand: np.ndarray | None = None
     display: ResizableDisplay | None = None
-    if not headless:
-        display = ResizableDisplay(
-            "Knee42 IVCAM RGB",
-            windows_primary_screen_size(),
-            coverage=0.85,
-        )
-        display.create(cv2)
+    try:
+        held_batch = HeldObservationBatch(bundle.frame_step)
+        started = time.perf_counter()
+        if not headless:
+            display = ResizableDisplay(
+                "Knee42 IVCAM RGB",
+                windows_primary_screen_size(),
+                coverage=0.85,
+            )
+            cleanup_stack.callback(cv2.destroyAllWindows)
+            display.create(cv2)
+    except BaseException as exc:
+        cleanup_stack.__exit__(type(exc), exc, exc.__traceback__)
+        raise
 
     def stop_recording() -> None:
         nonlocal recorder, last_recording_summary, recording_requested
@@ -537,6 +619,16 @@ def run_capture(
         if recorder is not None:
             last_recording_summary = recorder.stop()
             recorder = None
+
+    def stop_recording_on_exit(exc_type, _exc, _traceback):
+        try:
+            stop_recording()
+        except BaseException:
+            if exc_type is None:
+                raise
+        return False
+
+    cleanup_stack.push(stop_recording_on_exit)
 
     def save_auto_result(event, result: InferenceResult) -> None:
         if recorder is not None and event.segment is not None:
@@ -552,13 +644,10 @@ def run_capture(
             controller.mark_result()
 
     def flush_pending_auto_observation():
-        nonlocal pending_auto_observation
-        if pending_auto_observation is None or not pending_packet_timestamps:
+        pending = held_batch.take()
+        if pending is None:
             return None
-        trigger_values, feature = pending_auto_observation
-        timestamps = tuple(pending_packet_timestamps)
-        pending_auto_observation = None
-        pending_packet_timestamps.clear()
+        timestamps, trigger_values, feature = pending
         assert isinstance(controller, AutoKnee42Controller)
         return controller.add_held_observation_at_times(
             timestamps,
@@ -571,10 +660,13 @@ def run_capture(
             while max_frames is None or raw_frames < max_frames:
                 packet = source.read_packet()
                 if packet is None:
+                    observed_packet_eof = True
                     break
                 frame = packet.frame
                 raw_frames += 1
-                pending_packet_timestamps.append(packet.timestamp_sec)
+                if first_frame_timestamp_sec is None:
+                    first_frame_timestamp_sec = packet.timestamp_sec
+                last_frame_timestamp_sec = packet.timestamp_sec
                 source_fps = source.fps if source.fps > 0 else 30.0
                 if recording_requested and recorder is None:
                     recorder = SegmentSessionRecorder(
@@ -584,7 +676,7 @@ def run_capture(
                         source_origin_sec=packet.timestamp_sec,
                     )
                 if recorder is not None:
-                    recorder.add_frame(frame)
+                    recorder.add_frame(frame, timestamp_sec=packet.timestamp_sec)
                 if (raw_frames - 1) % bundle.frame_step == 0:
                     observation = detectors.extract_observation(frame)
                     latest_display_pose = observation.display_pose
@@ -597,12 +689,8 @@ def run_capture(
                     feature_frames += 1
                     if isinstance(controller, AutoKnee42Controller):
                         if controller.mode == "auto":
-                            if pending_auto_observation is not None:
-                                raise RuntimeError(
-                                    "detector produced a new observation before the previous "
-                                    "held observation was consumed"
-                                )
-                            pending_auto_observation = (
+                            held_batch.start(
+                                packet.timestamp_sec,
                                 observation.trigger_values,
                                 feature,
                             )
@@ -618,14 +706,17 @@ def run_capture(
                         isinstance(controller, AutoKnee42Controller)
                         and controller.mode == "auto"
                     ):
-                        pending_packet_timestamps.clear()
-                        pending_auto_observation = None
+                        held_batch.clear()
                         handle_controller_event(event)
+                elif (
+                    isinstance(controller, AutoKnee42Controller)
+                    and controller.mode == "auto"
+                ):
+                    held_batch.append(packet.timestamp_sec)
                 if (
                     isinstance(controller, AutoKnee42Controller)
                     and controller.mode == "auto"
-                    and pending_auto_observation is not None
-                    and len(pending_packet_timestamps) >= bundle.frame_step
+                    and held_batch.ready
                 ):
                     event = flush_pending_auto_observation()
                     assert event is not None
@@ -675,19 +766,16 @@ def run_capture(
                             if not isinstance(controller, AutoKnee42Controller) or controller.mode != "auto":
                                 continue
                             controller.reset()
-                            pending_packet_timestamps.clear()
-                            pending_auto_observation = None
+                            held_batch.clear()
                             last_result = None
                             recording_requested = True
                     elif key in (ord("r"), ord("R")):
                         controller.reset()
-                        pending_packet_timestamps.clear()
-                        pending_auto_observation = None
+                        held_batch.clear()
                         last_result = None
                     elif key in (ord("m"), ord("M")) and isinstance(controller, AutoKnee42Controller):
                         controller.toggle_mode()
-                        pending_packet_timestamps.clear()
-                        pending_auto_observation = None
+                        held_batch.clear()
                         last_result = None
                     elif key == 32 and isinstance(controller, AutoKnee42Controller):
                         event = controller.on_space()
@@ -695,18 +783,22 @@ def run_capture(
                             last_result = _predict_features(bundle, event.features)
                             controller.mark_result()
             if (
-                isinstance(controller, AutoKnee42Controller)
+                observed_packet_eof
+                and video is not None
+                and isinstance(controller, AutoKnee42Controller)
                 and controller.mode == "auto"
-                and pending_auto_observation is not None
+                and held_batch.active
             ):
                 event = flush_pending_auto_observation()
                 assert event is not None
                 handle_controller_event(event)
+            elif held_batch.active:
+                held_batch.clear()
             if (
-                video is not None
+                observed_packet_eof
+                and video is not None
                 and isinstance(controller, AutoKnee42Controller)
                 and controller.mode == "auto"
-                and last_result is None
             ):
                 event = controller.finalize_video_eof()
                 if event.infer:
@@ -717,11 +809,13 @@ def run_capture(
                 if event.infer:
                     last_result = _predict_features(bundle, event.features)
                     controller.mark_result()
-    finally:
-        stop_recording()
-        source.release()
-        if not headless:
-            cv2.destroyAllWindows()
+    except BaseException as exc:
+        held_batch.clear()
+        cleanup_stack.__exit__(type(exc), exc, exc.__traceback__)
+        raise
+    else:
+        held_batch.clear()
+        cleanup_stack.close()
     if last_result is None:
         mode_name = controller.mode if isinstance(controller, AutoKnee42Controller) else "sliding"
         state_name = controller.state
@@ -738,6 +832,8 @@ def run_capture(
         "mode": controller.mode if isinstance(controller, AutoKnee42Controller) else "sliding",
         "raw_frames": raw_frames,
         "feature_frames": feature_frames,
+        "first_frame_timestamp_sec": first_frame_timestamp_sec,
+        "last_frame_timestamp_sec": last_frame_timestamp_sec,
         "top1": last_result.top1.label_id,
         "top1_confidence": last_result.top1.confidence,
         "top3": [item.label_id for item in last_result.top3],
