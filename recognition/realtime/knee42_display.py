@@ -2,12 +2,15 @@
 from __future__ import annotations
 
 import ctypes
+import warnings
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
 import numpy as np
+
+from recognition.realtime.probability_reporting import validate_raw_probability
 
 
 SKY_BLUE_BGR = (235, 206, 135)
@@ -45,7 +48,24 @@ class ApplicationLayout:
 class DisplayPrediction:
     label_id: str
     display_text: str
-    confidence: float
+    raw_probability: float
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "raw_probability",
+            validate_raw_probability(self.raw_probability),
+        )
+
+    @property
+    def confidence(self) -> float:
+        """Deprecated read-only alias for the exact raw probability."""
+        warnings.warn(
+            "DisplayPrediction.confidence is deprecated; use raw_probability",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self.raw_probability
 
 
 @dataclass(frozen=True)
@@ -356,7 +376,7 @@ def draw_e2_information_panel(
         overline_font = ui_font(round(12 * scale))
         answer_font = editorial_font(max(48, round(58 * scale)))
         id_font = ui_font(round(17 * scale))
-        confidence_font = ui_font(round(27 * scale))
+        raw_probability_font = ui_font(round(27 * scale))
         candidate_font = ui_font(round(17 * scale))
         candidate_id_font = ui_font(round(10 * scale))
         score_font = ui_font(round(13 * scale))
@@ -365,17 +385,22 @@ def draw_e2_information_panel(
         if data.top1 is None:
             answer_text = "等待中"
             label_text = "—"
-            confidence_text = "—"
+            raw_probability_text = "RAW PROBABILITY · —"
         else:
             answer_text = data.top1.display_text
             label_text = data.top1.label_id
-            confidence_text = f"{data.top1.confidence:.1%}"
+            raw_probability_text = f"RAW PROBABILITY · {data.top1.raw_probability:.1%}"
         draw.text((padding, y), answer_text, font=answer_font, fill=(153, 220, 243))
         answer_box = draw.textbbox((padding, y), answer_text, font=answer_font)
         y = answer_box[3] + max(10, round(10 * scale))
         draw.text((padding, y), label_text, font=id_font, fill=(168, 180, 186))
         y += max(28, round(34 * scale))
-        draw.text((padding, y), confidence_text, font=confidence_font, fill=(255, 255, 255))
+        draw.text(
+            (padding, y),
+            raw_probability_text,
+            font=raw_probability_font,
+            fill=(255, 255, 255),
+        )
         y += max(44, round(54 * scale))
         draw.line((padding, y, width - padding, y), fill=(58, 66, 71), width=1)
         y += max(17, round(20 * scale))
@@ -396,7 +421,7 @@ def draw_e2_information_panel(
                 font=candidate_id_font,
                 fill=(115, 127, 133),
             )
-            score_text = f"{candidate.confidence:.1%}"
+            score_text = f"{candidate.raw_probability:.1%}"
             score_box = draw.textbbox((0, 0), score_text, font=score_font)
             draw.text(
                 (width - padding - (score_box[2] - score_box[0]), row_top),

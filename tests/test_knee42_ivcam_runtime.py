@@ -283,6 +283,8 @@ class RuntimeTests(unittest.TestCase):
         )
 
         self.assertEqual(data.top1.display_text, "可以")
+        self.assertTrue(hasattr(data.top1, "raw_probability"))
+        self.assertEqual(data.top1.raw_probability, 0.268)
         self.assertEqual([item.label_id for item in data.top3], ["K42_12", "K42_09", "K42_03"])
         self.assertEqual(data.model_version, "v11")
         self.assertEqual(data.state, "WAITING")
@@ -1324,6 +1326,17 @@ class RuntimeTests(unittest.TestCase):
         )
         self.assertEqual(finalize_calls, [True])
         self.assertEqual(result["top1"], "K42_02")
+        self.assertIn("top1_raw_probability", result)
+        self.assertEqual(result["top1_raw_probability"], 1.0)
+        self.assertNotIn("top1_confidence", result)
+        self.assertEqual(
+            result["probability_policy"],
+            {
+                "kind": "uncalibrated_softmax",
+                "acceptance_policy": "disabled_no_risk_coverage_evidence",
+                "calibration_artifact": None,
+            },
+        )
         self.assertTrue(packet_source.released)
 
     def test_auto_trigger_provenance_rejects_source_tampering(self):
@@ -1373,14 +1386,21 @@ class RuntimeTests(unittest.TestCase):
             self.assertEqual(result.top1.label_id in LABELS, True)
             self.assertEqual(len(result.top3), 3)
 
-    def test_decode_returns_sorted_top1_top3_and_confidence(self):
+    def test_decode_returns_sorted_top1_top3_and_exact_raw_probability(self):
         logits = torch.tensor([[0.0, 3.0, 2.0] + [-1.0] * 39])
+        expected = torch.softmax(logits[0], dim=0)
 
         result = decode_logits(logits, LABELS, {label: label for label in LABELS})
 
         self.assertEqual(result.top1.label_id, "K42_02")
         self.assertEqual([item.label_id for item in result.top3], ["K42_02", "K42_03", "K42_01"])
-        self.assertGreater(result.top1.confidence, result.top3[1].confidence)
+        self.assertTrue(all(hasattr(item, "raw_probability") for item in result.top3))
+        self.assertEqual(result.top1.raw_probability, float(expected[1].item()))
+        self.assertEqual(
+            [item.raw_probability for item in result.top3],
+            [float(expected[index].item()) for index in (1, 2, 0)],
+        )
+        self.assertGreater(result.top1.raw_probability, result.top3[1].raw_probability)
 
     def test_overlay_includes_predictions_fps_source_mode_and_state(self):
         logits = torch.tensor([[0.0, 3.0, 2.0] + [-1.0] * 39])
@@ -1397,7 +1417,8 @@ class RuntimeTests(unittest.TestCase):
 
         self.assertIn("Top-1", rendered)
         self.assertIn("Top-3", rendered)
-        self.assertIn("confidence", rendered.lower())
+        self.assertIn("raw probability", rendered.lower())
+        self.assertNotIn("confidence", rendered.lower())
         self.assertIn("FPS 27.4", rendered)
         self.assertIn("camera:2", rendered)
         self.assertIn("manual", rendered)

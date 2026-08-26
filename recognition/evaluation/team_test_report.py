@@ -14,6 +14,7 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.worksheet.datavalidation import DataValidation
 
 from recognition.evaluation.team_test_session import TeamTestSession
+from recognition.realtime.probability_reporting import probability_policy_record
 
 
 ERROR_REASON_OPTIONS = [
@@ -73,7 +74,7 @@ def build_label_summary(session: TeamTestSession) -> list[dict[str, object]]:
 def _trial_row(record) -> dict[str, object]:
     row = asdict(record)
     row["top3_candidates"] = " | ".join(
-        f"{item['label']}:{float(item['confidence']):.4f}"
+        f"{item['label']}:{float(item['raw_probability']):.4f}"
         for item in record.top3_candidates
     )
     return row
@@ -230,7 +231,7 @@ def export_team_test_reports(session: TeamTestSession) -> TeamReportPaths:
     paths.session_json.write_text(
         json.dumps(
             {
-                "schema_version": 1,
+                "schema_version": 2,
                 "generated_at": datetime.now().isoformat(timespec="seconds"),
                 "tester_id": session.tester_id,
                 "model_version": session.model_version,
@@ -240,6 +241,7 @@ def export_team_test_reports(session: TeamTestSession) -> TeamReportPaths:
                 "total_trials": session.total_trials,
                 "is_complete": session.is_complete,
                 "runtime_metadata": session.runtime_metadata,
+                "probability_policy": probability_policy_record(),
             },
             ensure_ascii=False,
             indent=2,

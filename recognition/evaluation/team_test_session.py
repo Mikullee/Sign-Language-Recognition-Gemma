@@ -7,6 +7,11 @@ from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 
+from recognition.realtime.probability_reporting import (
+    probability_policy_record,
+    validate_raw_probability,
+)
+
 
 NO_DETECTION_LABEL = "未偵測"
 EXPECTED_TEAM_TEST_LABELS = [
@@ -66,8 +71,8 @@ class TeamTrialRecord:
     outcome: str
     top1_correct: bool
     top3_hit: bool
-    raw_confidence: float
-    calibrated_confidence: float
+    raw_probability: float
+    probability_policy: dict[str, object]
     top3_candidates: list[dict[str, object]]
     clip_start_sec: float | None
     clip_end_sec: float | None
@@ -139,8 +144,7 @@ class TeamTestSession:
         self,
         *,
         predicted_label: str,
-        raw_confidence: float,
-        calibrated_confidence: float,
+        raw_probability: float,
         top3_candidates: list[tuple[str, float]],
         clip_start_sec: float | None = None,
         clip_end_sec: float | None = None,
@@ -153,9 +157,9 @@ class TeamTestSession:
             {
                 "label": label,
                 "text": self.label_display.get(label, label),
-                "confidence": float(confidence),
+                "raw_probability": validate_raw_probability(probability),
             }
-            for label, confidence in top3_candidates
+            for label, probability in top3_candidates
         ]
         duration = (
             float(clip_end_sec - clip_start_sec)
@@ -179,8 +183,8 @@ class TeamTestSession:
             outcome=outcome,
             top1_correct=predicted_label == expected.label_id,
             top3_hit=any(label == expected.label_id for label, _ in top3_candidates),
-            raw_confidence=float(raw_confidence),
-            calibrated_confidence=float(calibrated_confidence),
+            raw_probability=validate_raw_probability(raw_probability),
+            probability_policy=probability_policy_record(),
             top3_candidates=top3,
             clip_start_sec=clip_start_sec,
             clip_end_sec=clip_end_sec,
@@ -212,8 +216,7 @@ class TeamTestSession:
     def stage_no_detection(self) -> TeamTrialRecord:
         return self.stage_prediction(
             predicted_label=NO_DETECTION_LABEL,
-            raw_confidence=0.0,
-            calibrated_confidence=0.0,
+            raw_probability=0.0,
             top3_candidates=[],
             finalize_reason="no_detection_key",
             outcome="no_detection",
@@ -224,13 +227,14 @@ class TeamTestSession:
 
     def _metadata(self) -> dict[str, object]:
         return {
-            "schema_version": 1,
+            "schema_version": 2,
             "tester_id": self.tester_id,
             "labels": self.labels,
             "label_display": self.label_display,
             "trials_per_label": self.trials_per_label,
             "model_version": self.model_version,
             "runtime_metadata": self.runtime_metadata,
+            "probability_policy": probability_policy_record(),
             "records": [asdict(record) for record in self.records],
         }
 
@@ -255,9 +259,41 @@ class TeamTestSession:
         for key, expected in expected_metadata.items():
             if payload.get(key) != expected:
                 raise ValueError(f"saved team-test progress has incompatible {key}")
-        self.records = [TeamTrialRecord(**row) for row in payload.get("records", [])]
+        self.records = [
+            TeamTrialRecord(**self._normalize_record(row))
+            for row in payload.get("records", [])
+        ]
         if len(self.records) > self.total_trials:
             raise ValueError("saved team-test progress contains too many trials")
+
+    @staticmethod
+    def _normalize_record(row: dict[str, object]) -> dict[str, object]:
+        """Read schema-one records while emitting only schema-two semantics."""
+        normalized = dict(row)
+        if "raw_probability" not in normalized:
+            if "raw_confidence" not in normalized:
+                raise ValueError("saved team-test record has no raw probability")
+            normalized["raw_probability"] = normalized["raw_confidence"]
+        normalized["raw_probability"] = validate_raw_probability(
+            normalized["raw_probability"]  # type: ignore[arg-type]
+        )
+        normalized.pop("raw_confidence", None)
+        normalized.pop("calibrated_confidence", None)
+        normalized["probability_policy"] = probability_policy_record()
+        top3 = []
+        for item in normalized.get("top3_candidates", []):  # type: ignore[assignment]
+            candidate = dict(item)
+            if "raw_probability" not in candidate:
+                if "confidence" not in candidate:
+                    raise ValueError("saved top-3 candidate has no raw probability")
+                candidate["raw_probability"] = candidate["confidence"]
+            candidate["raw_probability"] = validate_raw_probability(
+                candidate["raw_probability"]  # type: ignore[arg-type]
+            )
+            candidate.pop("confidence", None)
+            top3.append(candidate)
+        normalized["top3_candidates"] = top3
+        return normalized
 
 
 class TeamTestWorkflow:

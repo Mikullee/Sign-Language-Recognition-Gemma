@@ -5,6 +5,7 @@ import argparse
 import hashlib
 import json
 import time
+import warnings
 from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
@@ -45,6 +46,10 @@ from recognition.realtime.knee42_preprocessing import (
     materialize_sequence,
     normalize_frame,
     observation_from_results,
+)
+from recognition.realtime.probability_reporting import (
+    probability_policy_record,
+    validate_raw_probability,
 )
 
 
@@ -133,7 +138,24 @@ def verify_auto_trigger_provenance(package_root: Path) -> dict[str, Any]:
 class Prediction:
     label_id: str
     display_text: str
-    confidence: float
+    raw_probability: float
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "raw_probability",
+            validate_raw_probability(self.raw_probability),
+        )
+
+    @property
+    def confidence(self) -> float:
+        """Deprecated read-only alias for the exact raw probability."""
+        warnings.warn(
+            "Prediction.confidence is deprecated; use raw_probability",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self.raw_probability
 
 
 @dataclass(frozen=True)
@@ -157,7 +179,7 @@ def decode_logits(
         Prediction(
             label_id=str(labels[index]),
             display_text=str(display_text.get(str(labels[index]), str(labels[index]))),
-            confidence=float(probabilities[index].item()),
+            raw_probability=float(probabilities[index].item()),
         )
         for index in ranked
     )
@@ -310,9 +332,9 @@ def overlay_lines(
         prediction_lines = ["Top-1: waiting", "Top-3: waiting"]
     else:
         prediction_lines = [
-            f"Top-1: {result.top1.label_id} {result.top1.display_text} | confidence {result.top1.confidence:.1%}",
+            f"Top-1: {result.top1.label_id} {result.top1.display_text} | raw probability {result.top1.raw_probability:.1%}",
             *[
-                f"Top-3 #{rank}: {item.label_id} {item.display_text} | confidence {item.confidence:.1%}"
+                f"Top-3 #{rank}: {item.label_id} {item.display_text} | raw probability {item.raw_probability:.1%}"
                 for rank, item in enumerate(result.top3, 1)
             ],
         ]
@@ -348,7 +370,7 @@ def build_display_panel_data(
         return DisplayPrediction(
             label_id=item.label_id,
             display_text=item.display_text,
-            confidence=item.confidence,
+            raw_probability=item.raw_probability,
         )
 
     return DisplayPanelData(
@@ -951,8 +973,9 @@ def run_capture(
         "first_frame_timestamp_sec": first_frame_timestamp_sec,
         "last_frame_timestamp_sec": last_frame_timestamp_sec,
         "top1": last_result.top1.label_id,
-        "top1_confidence": last_result.top1.confidence,
+        "top1_raw_probability": last_result.top1.raw_probability,
         "top3": [item.label_id for item in last_result.top3],
+        "probability_policy": probability_policy_record(),
         "device": str(device),
     }
     if last_recording_summary is not None:

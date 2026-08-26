@@ -15,6 +15,10 @@ import numpy as np
 
 from recognition.realtime.knee42_controllers import SegmentEvidence
 from recognition.realtime.knee42_clock import MAX_PRACTICAL_FPS
+from recognition.realtime.probability_reporting import (
+    probability_policy_record,
+    validate_raw_probability,
+)
 
 
 CSV_FIELDS = (
@@ -27,7 +31,7 @@ CSV_FIELDS = (
     "boundary_policy",
     "top1_label",
     "top1_text",
-    "top1_confidence",
+    "top1_raw_probability",
     "top3_json",
     "exact_clip",
     "context_clip",
@@ -190,7 +194,7 @@ class SegmentSessionRecorder:
             {
                 "label_id": str(item.label_id),
                 "display_text": str(item.display_text),
-                "confidence": float(item.confidence),
+                "raw_probability": validate_raw_probability(item.raw_probability),
             }
             for item in result.top3
         ]
@@ -199,6 +203,7 @@ class SegmentSessionRecorder:
             **asdict(evidence),
             "top1": top3[0],
             "top3": top3,
+            "probability_policy": probability_policy_record(),
             "source_origin_sec": self.source_origin_sec,
             "source_fps": self.fps,
             "source_video": self.source_path.name,
@@ -220,7 +225,7 @@ class SegmentSessionRecorder:
             "boundary_policy": evidence.boundary_policy,
             "top1_label": top3[0]["label_id"],
             "top1_text": top3[0]["display_text"],
-            "top1_confidence": f"{top3[0]['confidence']:.9f}",
+            "top1_raw_probability": f"{top3[0]['raw_probability']:.9f}",
             "top3_json": json.dumps(top3, ensure_ascii=False, separators=(",", ":")),
             "exact_clip": exact_rel.as_posix(),
             "context_clip": context_rel.as_posix(),
@@ -272,6 +277,7 @@ class SegmentSessionRecorder:
                     "frame_count": self._frame_count,
                     "frame_timestamps_sec": self._frame_timestamps_sec,
                     "segment_count": len(self._segments),
+                    "probability_policy": probability_policy_record(),
                     "status": "FINALIZED",
                 },
                 ensure_ascii=False,

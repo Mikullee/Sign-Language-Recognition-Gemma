@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import warnings
 from collections import deque
 from dataclasses import asdict, dataclass
 from datetime import datetime
@@ -60,6 +61,11 @@ from recognition.realtime.personal_temporal import (
     PersonalTemporalPredictor,
     with_temporal_probability,
 )
+from recognition.realtime.probability_reporting import (
+    PROBABILITY_POLICY,
+    probability_policy_record,
+    validate_raw_probability,
+)
 
 
 PATHS = preview_paths()
@@ -67,8 +73,6 @@ ROOT = PATHS.repo_root
 RESULTS_DIR = PATHS.results_dir
 HAND_MODEL = PATHS.hand_model
 POSE_MODEL = PATHS.pose_model
-DEFAULT_CALIBRATED_MIN_CONFIDENCE = 0.50
-REJECTED_LABEL = "無明確結果"
 WAITING_LABEL = "等待開始"
 SHORT_SEGMENT_LABEL = "片段過短"
 AUTO_MODE_LABEL = "自動切段"
@@ -103,31 +107,47 @@ def draw_text(img: np.ndarray, text: str, xy: tuple[int, int], font, color: tupl
     return cv2.cvtColor(np.array(pil), cv2.COLOR_RGB2BGR)
 
 
-def calibrate_confidence(raw_confidence: float) -> float:
-    raw = float(np.clip(raw_confidence, 0.0, 1.0))
-    normalized = np.clip((raw - 0.05) / 0.40, 0.0, 1.0)
-    eased = normalized ** 0.70
-    calibrated = 0.15 + 0.80 * eased
-    return float(np.clip(calibrated, 0.0, 0.95))
+def calibrate_confidence(raw_probability: float) -> float:
+    """Deprecated compatibility shim returning the exact raw probability."""
+    return validate_raw_probability(raw_probability)
+
+
+def format_raw_probability_percent(raw_probability: float) -> str:
+    return f"{validate_raw_probability(raw_probability):.1%}"
 
 
 def format_confidence_percent(confidence: float) -> str:
-    return f"{round(float(confidence) * 100):.0f}%"
+    """Deprecated display alias; formats the exact raw probability."""
+    warnings.warn(
+        "format_confidence_percent is deprecated; use format_raw_probability_percent",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    return format_raw_probability_percent(confidence)
 
 
-def decide_prediction_output(localized_label: str, raw_confidence: float, calibrated_threshold: float) -> tuple[str, float, float]:
-    calibrated_confidence = calibrate_confidence(raw_confidence)
-    if calibrated_confidence >= calibrated_threshold:
-        return localized_label, raw_confidence, calibrated_confidence
-    return REJECTED_LABEL, raw_confidence, calibrated_confidence
+def decide_prediction_output(
+    localized_label: str,
+    raw_probability: float,
+    _legacy_threshold: float | None = None,
+) -> tuple[str, float, float]:
+    """Compatibility tuple with acceptance disabled and no score transform."""
+    probability = validate_raw_probability(raw_probability)
+    return localized_label, probability, probability
 
 
 def localize_label(label: str, label_display: dict[str, str]) -> str:
     return str(label_display.get(label, label))
 
 
-def localize_top3(top3_candidates: list[tuple[str, float]], label_display: dict[str, str]) -> list[tuple[str, float]]:
-    return [(localize_label(label, label_display), score) for label, score in top3_candidates]
+def localize_top3_probabilities(
+    top3_candidates: list[tuple[str, float]],
+    label_display: dict[str, str],
+) -> list[tuple[str, float]]:
+    return [
+        (localize_label(label, label_display), validate_raw_probability(score))
+        for label, score in top3_candidates
+    ]
 
 
 @dataclass(frozen=True)
@@ -135,38 +155,33 @@ class SegmentPrediction:
     predicted_label_id: str
     predicted_text: str
     display_label: str
-    accepted: bool
-    raw_confidence: float
-    calibrated_confidence: float
-    top3_label_scores: list[tuple[str, float]]
-    top3_display_scores: list[tuple[str, float]]
+    raw_probability: float
+    top3_label_probabilities: list[tuple[str, float]]
+    top3_display_probabilities: list[tuple[str, float]]
 
 
 def decode_segment_prediction(
     probs: np.ndarray,
     labels: list[str],
     label_display: dict[str, str],
-    calibrated_min_confidence: float,
+    _legacy_acceptance_threshold: float | None = None,
 ) -> SegmentPrediction:
-    top3_label_scores = decode_top3_candidates(probs, labels)
-    top3_display_scores = localize_top3(top3_label_scores, label_display)
+    top3_label_probabilities = decode_top3_candidates(probs, labels)
+    top3_display_probabilities = localize_top3_probabilities(
+        top3_label_probabilities,
+        label_display,
+    )
     pred_idx = int(np.argmax(probs))
     predicted_label_id = str(labels[pred_idx])
     predicted_text = localize_label(predicted_label_id, label_display)
-    display_label, raw_confidence, calibrated_confidence = decide_prediction_output(
-        predicted_text,
-        float(probs[pred_idx]),
-        calibrated_min_confidence,
-    )
+    raw_probability = validate_raw_probability(float(probs[pred_idx]))
     return SegmentPrediction(
         predicted_label_id=predicted_label_id,
         predicted_text=predicted_text,
-        display_label=display_label,
-        accepted=display_label != REJECTED_LABEL,
-        raw_confidence=raw_confidence,
-        calibrated_confidence=calibrated_confidence,
-        top3_label_scores=top3_label_scores,
-        top3_display_scores=top3_display_scores,
+        display_label=predicted_text,
+        raw_probability=raw_probability,
+        top3_label_probabilities=top3_label_probabilities,
+        top3_display_probabilities=top3_display_probabilities,
     )
 
 
@@ -251,8 +266,8 @@ def draw_overlay(
     canvas = draw_text(canvas, f"片段狀態：{segment_status}", (190, 18), FONT_HINT, (255, 220, 120))
     canvas = draw_text(canvas, f"目前辨識：{display_label}", (26, 40), FONT_RESULT, (0, 255, 0))
     if top3_candidates:
-        candidate_text = "候選結果：" + " | ".join(
-            f"{label} {format_confidence_percent(calibrate_confidence(score))}" for label, score in top3_candidates
+        candidate_text = "候選結果（raw probability）：" + " | ".join(
+            f"{label} {format_raw_probability_percent(score)}" for label, score in top3_candidates
         )
     else:
         candidate_text = "候選結果：-"
@@ -339,7 +354,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--save-log", dest="save_log", action="store_true")
     parser.add_argument("--no-save-log", dest="save_log", action="store_false")
     parser.set_defaults(save_log=None)
-    parser.add_argument("--min-conf-override", type=float, default=-1.0, help="Override calibrated confidence threshold in 0-1 space.")
+    parser.add_argument(
+        "--min-conf-override",
+        type=float,
+        default=-1.0,
+        help=(
+            "Deprecated compatibility option. Acceptance threshold is unavailable "
+            "without calibration/risk-coverage evidence."
+        ),
+    )
     parser.add_argument("--trigger-mode", choices=["auto", "manual"], default=None)
     parser.add_argument("--auto-config", default="", help="JSON file containing calibrated auto-trigger settings.")
     parser.add_argument(
@@ -408,6 +431,14 @@ def resolve_runtime_args(args: argparse.Namespace) -> argparse.Namespace:
         raise ValueError("backend must be 'auto' or 'dshow'.")
     if args.trigger_mode not in {"auto", "manual"}:
         raise ValueError("trigger_mode must be 'auto' or 'manual'.")
+    if not np.isfinite(args.min_conf_override):
+        raise ValueError("--min-conf-override must be finite")
+    if args.min_conf_override >= 0.0:
+        raise ValueError(
+            "acceptance threshold is unavailable without "
+            "calibration/risk-coverage evidence"
+        )
+    args.min_conf_override = None
     if args.team_test:
         args.trigger_mode = "auto"
         args.save_log = False
@@ -460,7 +491,10 @@ def decode_top3_candidates(probs: np.ndarray, labels: list[str]) -> list[tuple[s
         return []
     topk = min(3, int(probs.shape[0]))
     indices = np.argsort(probs)[-3:][::-1]
-    return [(str(labels[int(idx)]), float(probs[int(idx)])) for idx in indices[:topk]]
+    return [
+        (str(labels[int(idx)]), validate_raw_probability(float(probs[int(idx)])))
+        for idx in indices[:topk]
+    ]
 
 
 def select_torch_device(preferred_device: str | None = None) -> torch.device:
@@ -522,7 +556,17 @@ def reset_runtime_state(emitted_labels: list[str]) -> None:
     emitted_labels.clear()
 
 
-def infer_segment_prediction(frame_vectors: list[np.ndarray], sequence_length: int, append_delta: bool, zscore_features: bool, model: BiGRUSentenceClassifier, device: torch.device, labels: list[str], label_display: dict[str, str], calibrated_min_confidence: float) -> tuple[str, float, float, list[tuple[str, float]]]:
+def infer_segment_prediction(
+    frame_vectors: list[np.ndarray],
+    sequence_length: int,
+    append_delta: bool,
+    zscore_features: bool,
+    model: BiGRUSentenceClassifier,
+    device: torch.device,
+    labels: list[str],
+    label_display: dict[str, str],
+    _legacy_acceptance_threshold: float | None = None,
+) -> tuple[str, float, list[tuple[str, float]]]:
     prediction = infer_segment_prediction_details(
         frame_vectors,
         sequence_length,
@@ -532,19 +576,28 @@ def infer_segment_prediction(frame_vectors: list[np.ndarray], sequence_length: i
         device,
         labels,
         label_display,
-        calibrated_min_confidence,
+        _legacy_acceptance_threshold,
     )
     if prediction is None:
-        return SHORT_SEGMENT_LABEL, 0.0, 0.0, []
+        return SHORT_SEGMENT_LABEL, 0.0, []
     return (
         prediction.display_label,
-        prediction.raw_confidence,
-        prediction.calibrated_confidence,
-        prediction.top3_display_scores,
+        prediction.raw_probability,
+        prediction.top3_display_probabilities,
     )
 
 
-def infer_segment_prediction_details(frame_vectors: list[np.ndarray], sequence_length: int, append_delta: bool, zscore_features: bool, model: BiGRUSentenceClassifier, device: torch.device, labels: list[str], label_display: dict[str, str], calibrated_min_confidence: float) -> SegmentPrediction | None:
+def infer_segment_prediction_details(
+    frame_vectors: list[np.ndarray],
+    sequence_length: int,
+    append_delta: bool,
+    zscore_features: bool,
+    model: BiGRUSentenceClassifier,
+    device: torch.device,
+    labels: list[str],
+    label_display: dict[str, str],
+    _legacy_acceptance_threshold: float | None = None,
+) -> SegmentPrediction | None:
     seq_array = build_sequence_feature_from_list(frame_vectors, sequence_length, append_delta, zscore_features)
     if seq_array is None:
         return None
@@ -556,7 +609,7 @@ def infer_segment_prediction_details(frame_vectors: list[np.ndarray], sequence_l
         probs,
         labels,
         label_display,
-        calibrated_min_confidence,
+        _legacy_acceptance_threshold,
     )
 
 
@@ -565,9 +618,6 @@ def main() -> None:
     cache_dir = ensure_artifacts_cached(Path(args.model_cache_dir))
     bundle = load_runtime_bundle(cache_dir)
     device = select_torch_device(bundle.get("device"))
-    calibrated_min_confidence = DEFAULT_CALIBRATED_MIN_CONFIDENCE
-    if args.min_conf_override > 0:
-        calibrated_min_confidence = float(args.min_conf_override)
 
     input_dim = int(
         build_sequence_feature(
@@ -638,7 +688,7 @@ def main() -> None:
                 "temporal_model_loaded": temporal_model is not None,
                 "source": str(args.source),
                 "backend": str(args.backend),
-                "confidence_threshold": calibrated_min_confidence,
+                "probability_policy": probability_policy_record(),
             },
             resume=bool(args.resume),
         )
@@ -657,8 +707,7 @@ def main() -> None:
     reset_events = 0
     saved_events = 0
     display_label = WAITING_LABEL
-    display_raw_confidence = 0.0
-    display_calibrated_confidence = 0.0
+    display_raw_probability = 0.0
     last_finalize_reason = ""
     last_clip_start_sec: float | None = None
     last_clip_end_sec: float | None = None
@@ -744,14 +793,12 @@ def main() -> None:
                         last_finalize_sec = segment.finalize_sec
                         if segment.duration_sec < auto_config.min_segment_sec:
                             display_label = SHORT_SEGMENT_LABEL
-                            display_raw_confidence = 0.0
-                            display_calibrated_confidence = 0.0
+                            display_raw_probability = 0.0
                             top3_candidates = []
                             if team_workflow is not None:
                                 team_workflow.stage_prediction(
                                     predicted_label=SHORT_SEGMENT_LABEL,
-                                    raw_confidence=0.0,
-                                    calibrated_confidence=0.0,
+                                    raw_probability=0.0,
                                     top3_candidates=[],
                                     clip_start_sec=segment.clip_start_sec,
                                     clip_end_sec=segment.clip_end_sec,
@@ -770,30 +817,23 @@ def main() -> None:
                                     device,
                                     bundle["labels"],
                                     bundle["label_display"],
-                                    calibrated_min_confidence,
                                 )
                                 if detail is None:
                                     raise RuntimeError("completed segment did not contain frame features")
                                 display_label = detail.display_label
-                                display_raw_confidence = detail.raw_confidence
-                                display_calibrated_confidence = detail.calibrated_confidence
-                                top3_candidates = detail.top3_display_scores
+                                display_raw_probability = detail.raw_probability
+                                top3_candidates = detail.top3_display_probabilities
                                 team_workflow.stage_prediction(
-                                    predicted_label=(
-                                        detail.predicted_label_id
-                                        if detail.accepted
-                                        else REJECTED_LABEL
-                                    ),
-                                    raw_confidence=detail.raw_confidence,
-                                    calibrated_confidence=detail.calibrated_confidence,
-                                    top3_candidates=detail.top3_label_scores,
+                                    predicted_label=detail.predicted_label_id,
+                                    raw_probability=detail.raw_probability,
+                                    top3_candidates=detail.top3_label_probabilities,
                                     clip_start_sec=segment.clip_start_sec,
                                     clip_end_sec=segment.clip_end_sec,
                                     finalize_sec=segment.finalize_sec,
                                     finalize_reason=segment.reason,
                                 )
                             else:
-                                display_label, display_raw_confidence, display_calibrated_confidence, top3_candidates = infer_segment_prediction(
+                                display_label, display_raw_probability, top3_candidates = infer_segment_prediction(
                                     segment.frame_vectors,
                                     int(bundle["sequence_length"]),
                                     bool(bundle["append_delta"]),
@@ -802,9 +842,8 @@ def main() -> None:
                                     device,
                                     bundle["labels"],
                                     bundle["label_display"],
-                                    calibrated_min_confidence,
                                 )
-                            if display_label not in {REJECTED_LABEL, SHORT_SEGMENT_LABEL}:
+                            if display_label != SHORT_SEGMENT_LABEL:
                                 emitted_labels.append(display_label)
                     elif auto_engine.state == SEGMENT_STATE_IDLE and latest_analysis.is_blank and not emitted_labels:
                         display_label = WAITING_LABEL
@@ -820,11 +859,14 @@ def main() -> None:
                         "manual_active": manual_active,
                         "predicted_label": display_label,
                         "display_label": display_label,
-                        "raw_confidence": round(float(display_raw_confidence), 4),
-                        "calibrated_confidence": round(float(display_calibrated_confidence), 4),
-                        "display_confidence": round(float(display_calibrated_confidence), 4),
-                        "decision_threshold_source": "calibrated_confidence",
-                        "top3_candidates": [{"label": label, "confidence": round(score, 4)} for label, score in top3_candidates],
+                        "raw_probability": round(float(display_raw_probability), 4),
+                        "probability_kind": PROBABILITY_POLICY.kind,
+                        "acceptance_policy": PROBABILITY_POLICY.acceptance_policy,
+                        "calibration_artifact": PROBABILITY_POLICY.calibration_artifact,
+                        "top3_candidates": [
+                            {"label": label, "raw_probability": round(score, 4)}
+                            for label, score in top3_candidates
+                        ],
                         "segment_state": auto_engine.state if args.trigger_mode == "auto" else ("SIGNING_ACTIVE" if manual_active else "IDLE_BLANK"),
                         "segment_status": localize_segment_state(
                             auto_engine.state if args.trigger_mode == "auto" else (SEGMENT_STATE_ACTIVE if manual_active else SEGMENT_STATE_IDLE),
@@ -892,8 +934,7 @@ def main() -> None:
                     previous_frame_vector = None
                     top3_candidates = []
                     display_label = WAITING_LABEL
-                    display_raw_confidence = 0.0
-                    display_calibrated_confidence = 0.0
+                    display_raw_probability = 0.0
                     last_finalize_reason = ""
                     last_clip_start_sec = None
                     last_clip_end_sec = None
@@ -904,8 +945,7 @@ def main() -> None:
                     previous_frame_vector = None
                     top3_candidates = []
                     display_label = WAITING_LABEL
-                    display_raw_confidence = 0.0
-                    display_calibrated_confidence = 0.0
+                    display_raw_probability = 0.0
                     last_finalize_reason = ""
                     last_clip_start_sec = None
                     last_clip_end_sec = None
@@ -918,8 +958,7 @@ def main() -> None:
                 ):
                     team_workflow.press_no_detection()
                     display_label = NO_DETECTION_LABEL
-                    display_raw_confidence = 0.0
-                    display_calibrated_confidence = 0.0
+                    display_raw_probability = 0.0
                     top3_candidates = []
                     auto_engine, temporal_predictor = new_auto_trigger()
                 frame_index += 1
@@ -934,8 +973,7 @@ def main() -> None:
                 previous_frame_vector = None
                 top3_candidates = []
                 display_label = WAITING_LABEL
-                display_raw_confidence = 0.0
-                display_calibrated_confidence = 0.0
+                display_raw_probability = 0.0
                 last_finalize_reason = ""
                 last_clip_start_sec = None
                 last_clip_end_sec = None
@@ -950,8 +988,7 @@ def main() -> None:
                     previous_frame_vector = None
                     top3_candidates = []
                     display_label = WAITING_LABEL
-                    display_raw_confidence = 0.0
-                    display_calibrated_confidence = 0.0
+                    display_raw_probability = 0.0
                     last_finalize_reason = ""
                     last_clip_start_sec = None
                     last_clip_end_sec = None
@@ -973,11 +1010,10 @@ def main() -> None:
                         )
                         if manual_duration_sec < auto_config.min_segment_sec:
                             display_label = SHORT_SEGMENT_LABEL
-                            display_raw_confidence = 0.0
-                            display_calibrated_confidence = 0.0
+                            display_raw_probability = 0.0
                             top3_candidates = []
                         else:
-                            display_label, display_raw_confidence, display_calibrated_confidence, top3_candidates = infer_segment_prediction(
+                            display_label, display_raw_probability, top3_candidates = infer_segment_prediction(
                                 manual_frame_vectors,
                                 int(bundle["sequence_length"]),
                                 bool(bundle["append_delta"]),
@@ -986,9 +1022,8 @@ def main() -> None:
                                 device,
                                 bundle["labels"],
                                 bundle["label_display"],
-                                calibrated_min_confidence,
                             )
-                            if display_label not in {REJECTED_LABEL, SHORT_SEGMENT_LABEL}:
+                            if display_label != SHORT_SEGMENT_LABEL:
                                 emitted_labels.append(display_label)
                         last_finalize_reason = "manual_space"
                         manual_frame_vectors = []
@@ -1004,8 +1039,7 @@ def main() -> None:
                     "emitted_labels": emitted_labels,
                     "reset_events": reset_events,
                     "saved_events": saved_events + 1,
-                    "calibrated_min_confidence": calibrated_min_confidence,
-                    "decision_threshold_source": "calibrated_confidence",
+                    "probability_policy": probability_policy_record(),
                 }
                 save_prediction_logs(RESULTS_DIR, prediction_log, session_payload, stamp=stamp)
                 saved_events += 1
@@ -1032,8 +1066,7 @@ def main() -> None:
             "emitted_labels": emitted_labels,
             "reset_events": reset_events,
             "saved_events": saved_events,
-            "calibrated_min_confidence": calibrated_min_confidence,
-            "decision_threshold_source": "calibrated_confidence",
+            "probability_policy": probability_policy_record(),
         }
         save_prediction_logs(RESULTS_DIR, prediction_log, session_payload, stamp=stamp)
 
