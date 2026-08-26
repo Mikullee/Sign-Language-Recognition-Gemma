@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import inspect
+import io
 import json
 import tempfile
 import unittest
+from contextlib import redirect_stderr
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -14,6 +16,7 @@ import torch
 import recognition.realtime.knee42_ivcam as knee42_ivcam
 
 from recognition.inference.daily30_sentence_model_utils import BiGRUSentenceClassifier
+from recognition.realtime.knee42_capture import apply_video_transform
 from recognition.realtime.knee42_ivcam import (
     InferenceResult,
     IntegrityError,
@@ -289,6 +292,153 @@ class RuntimeTests(unittest.TestCase):
         self.assertLess(detect_at, compose_at)
         self.assertNotIn("detectors.extract_observation(view", source)
         self.assertNotIn("detectors.extract_observation(display", source)
+
+    def test_runtime_threads_input_orientation_and_keeps_display_mirror_out_of_features(self):
+        raw_frame = np.repeat(
+            np.arange(1, 7, dtype=np.uint8).reshape(2, 3, 1),
+            3,
+            axis=2,
+        )
+        transformed_frame = apply_video_transform(
+            raw_frame,
+            90,
+            horizontal_mirror=True,
+        )
+        detector_frames = []
+        display_frames = []
+        predicted_features = []
+        source_calls = []
+        detector_policies = []
+        results = []
+
+        class PacketSource:
+            status = "video:orientation.mp4"
+            fps = 30.0
+            clock_mode = "video_source_timestamp"
+            resolved_rotation = 90
+            rotation_degrees = 90.0
+            input_mirror = True
+
+            def __init__(self):
+                self.done = False
+
+            def read_packet(self):
+                if self.done:
+                    return None
+                self.done = True
+                return SimpleNamespace(
+                    frame=transformed_frame.copy(),
+                    timestamp_sec=0.0,
+                    clock_mode=self.clock_mode,
+                )
+
+            def release(self):
+                return None
+
+        class Bundle:
+            sequence_length = 1
+            frame_step = 1
+            model_display_version = "test"
+
+            def __init__(self, root):
+                self.root = root
+
+            def predict(self, values, mask):
+                predicted_features.append((values.copy(), mask.copy()))
+                prediction = Prediction("K42_01", "test", 1.0)
+                return InferenceResult(top1=prediction, top3=(prediction,))
+
+        class Detectors:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def extract_observation(self, frame):
+                detector_frames.append(frame.copy())
+                return SimpleNamespace(
+                    display_pose=None,
+                    display_left_hand=None,
+                    display_right_hand=None,
+                    recognition_values=np.arange(219, dtype=np.float32),
+                    recognition_mask=np.ones(219, dtype=np.bool_),
+                    trigger_values=np.ones(225, dtype=np.float32),
+                )
+
+        class Display:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def create(self, _cv2):
+                return None
+
+            def content_size(self, _cv2):
+                return (6, 4)
+
+        def open_source(path, *, rotation, input_mirror, cv2_module):
+            source_calls.append((path, rotation, input_mirror, cv2_module is not None))
+            return PacketSource()
+
+        def create_detectors(_bundle, *, pixels_mirrored):
+            detector_policies.append(pixels_mirrored)
+            return Detectors()
+
+        def render(frame, *_args, **_kwargs):
+            display_frames.append(frame.copy())
+            return frame, None
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            bundle_root = Path(temp_dir) / "model"
+            bundle_root.mkdir()
+            for display_mirror in (False, True):
+                with (
+                    mock.patch.object(knee42_ivcam, "verify_auto_trigger_provenance"),
+                    mock.patch.object(knee42_ivcam, "load_bundle", return_value=Bundle(bundle_root)),
+                    mock.patch.object(knee42_ivcam, "open_video", side_effect=open_source),
+                    mock.patch.object(knee42_ivcam, "create_mediapipe_detectors", side_effect=create_detectors),
+                    mock.patch.object(knee42_ivcam, "ResizableDisplay", Display),
+                    mock.patch.object(knee42_ivcam, "windows_primary_screen_size", return_value=(800, 600)),
+                    mock.patch.object(knee42_ivcam, "render_application_view", side_effect=render),
+                    mock.patch("cv2.imshow"),
+                    mock.patch("cv2.waitKey", return_value=-1),
+                    mock.patch("cv2.destroyAllWindows"),
+                ):
+                    results.append(
+                        knee42_ivcam.run_capture(
+                            bundle_root,
+                            mode="sliding",
+                            camera_index=None,
+                            video=Path("orientation.mp4"),
+                            device=torch.device("cpu"),
+                            headless=False,
+                            max_frames=None,
+                            inference_stride=1,
+                            rotation=90,
+                            input_mirror=True,
+                            display_mirror=display_mirror,
+                        )
+                    )
+
+        self.assertEqual(
+            source_calls,
+            [
+                (Path("orientation.mp4"), 90, True, True),
+                (Path("orientation.mp4"), 90, True, True),
+            ],
+        )
+        self.assertEqual(detector_policies, [True, True])
+        np.testing.assert_array_equal(detector_frames[0], transformed_frame)
+        np.testing.assert_array_equal(detector_frames[1], transformed_frame)
+        np.testing.assert_array_equal(display_frames[0], transformed_frame)
+        np.testing.assert_array_equal(display_frames[1], np.flip(transformed_frame, axis=1))
+        np.testing.assert_array_equal(predicted_features[0][0], predicted_features[1][0])
+        np.testing.assert_array_equal(predicted_features[0][1], predicted_features[1][1])
+        for result in results:
+            self.assertEqual(result["resolved_rotation"], 90)
+            self.assertTrue(result["input_mirror"])
+        self.assertFalse(results[0]["display_mirror"])
+        self.assertTrue(results[1]["display_mirror"])
 
     def test_runtime_uses_packet_timestamps_without_nominal_fps_synthesis(self):
         from recognition.realtime.knee42_ivcam import run_capture
@@ -1180,8 +1330,36 @@ class RuntimeTests(unittest.TestCase):
         sliding = parser.parse_args(["--bundle", "model", "--mode", "sliding"])
 
         self.assertEqual(automatic.mode, "auto")
+        self.assertEqual(automatic.rotation, "auto")
+        self.assertEqual(automatic.input_mirror, "off")
+        self.assertEqual(automatic.display_mirror, "off")
         self.assertEqual(manual.mode, "manual")
         self.assertEqual(sliding.mode, "sliding")
+
+        oriented = parser.parse_args(
+            [
+                "--bundle",
+                "model",
+                "--rotation",
+                "270",
+                "--input-mirror",
+                "on",
+                "--display-mirror",
+                "on",
+            ]
+        )
+        self.assertEqual(oriented.rotation, "270")
+        self.assertEqual(oriented.input_mirror, "on")
+        self.assertEqual(oriented.display_mirror, "on")
+
+        for invalid_args in (
+            ["--rotation", "45"],
+            ["--input-mirror", "true"],
+            ["--display-mirror", "yes"],
+        ):
+            with self.subTest(invalid_args=invalid_args):
+                with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                    parser.parse_args(["--bundle", "model", *invalid_args])
 
     def test_auto_states_are_localized_for_operator_feedback(self):
         self.assertEqual(auto_display_state("IDLE_BLANK", calibrated=False), "CALIBRATING")

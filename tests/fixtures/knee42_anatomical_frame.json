@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "description": "Synthetic asymmetric landmark markers for anatomical handedness tests; contains no people or recordings.",
+  "anatomical_markers": {
+    "left_hand_first_x": 9001.0,
+    "right_hand_first_x": 1001.0,
+    "pose_left_index": 11,
+    "pose_left_x": 111.0,
+    "pose_right_index": 12,
+    "pose_right_x": 121.0
+  },
+  "scenarios": {
+    "mirrored_pixels": {
+      "pixels_mirrored": true,
+      "detections": [
+        {
+          "mediapipe_label": "Right",
+          "anatomical_hand": "right",
+          "first_x": 1001.0
+        },
+        {
+          "mediapipe_label": "Left",
+          "anatomical_hand": "left",
+          "first_x": 9001.0
+        }
+      ]
+    },
+    "unmirrored_pixels": {
+      "pixels_mirrored": false,
+      "detections": [
+        {
+          "mediapipe_label": "Left",
+          "anatomical_hand": "right",
+          "first_x": 1001.0
+        },
+        {
+          "mediapipe_label": "Right",
+          "anatomical_hand": "left",
+          "first_x": 9001.0
+        }
+      ]
+    }
+  },
+  "invariant": "The 9001/1001 x markers are intentionally unsuitable as an anatomical ordering rule; only declared pixel mirroring and MediaPipe labels determine hand slots."
+}

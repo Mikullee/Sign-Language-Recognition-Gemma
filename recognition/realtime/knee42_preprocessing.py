@@ -7,6 +7,8 @@ from typing import Any
 
 import numpy as np
 
+from recognition.realtime.knee42_orientation import anatomical_hand_slot
+
 
 POSE_KEEP = tuple(index for index in range(33) if index not in (25, 26))
 HAND_LANDMARKS = 21
@@ -62,6 +64,8 @@ def flatten_landmarks(
 def _result_landmark_groups(
     hand_result: Any,
     pose_result: Any,
+    *,
+    pixels_mirrored: bool,
 ) -> tuple[Sequence[Any] | None, Sequence[Any] | None, Sequence[Any] | None]:
     pose_groups = getattr(pose_result, "pose_landmarks", []) if pose_result is not None else []
     pose_landmarks = pose_groups[0] if pose_groups else None
@@ -69,18 +73,40 @@ def _result_landmark_groups(
     if hand_result is not None:
         handedness_groups = getattr(hand_result, "handedness", [])
         landmark_groups = getattr(hand_result, "hand_landmarks", [])
+        if len(handedness_groups) != len(landmark_groups):
+            raise ValueError(
+                "MediaPipe handedness and hand landmark group counts do not match"
+            )
         for handedness, landmarks in zip(handedness_groups, landmark_groups):
-            if not handedness or len(landmarks) != HAND_LANDMARKS:
+            if not handedness:
+                raise ValueError("MediaPipe handedness group is empty")
+            if len(landmarks) != HAND_LANDMARKS:
                 continue
-            label = str(handedness[0].category_name).strip().lower()
-            if label in hands:
-                hands[label] = landmarks
+            label = getattr(handedness[0], "category_name", None)
+            slot = anatomical_hand_slot(label, pixels_mirrored=pixels_mirrored)
+            if hands[slot] is not None:
+                raise ValueError(f"ambiguous duplicate anatomical {slot} handedness")
+            hands[slot] = landmarks
     return pose_landmarks, hands["left"], hands["right"]
 
 
-def observation_from_results(hand_result: Any, pose_result: Any) -> FrameObservation:
-    """Create the 225 trigger and 219+mask recognition views from one detection."""
-    pose, left, right = _result_landmark_groups(hand_result, pose_result)
+def observation_from_results(
+    hand_result: Any,
+    pose_result: Any,
+    *,
+    pixels_mirrored: bool = True,
+) -> FrameObservation:
+    """Create trigger/model views using an explicit pixel-handedness policy.
+
+    ``True`` preserves the legacy MediaPipe/selfie-label assumption for callers
+    that have not yet declared source orientation. Formal runtime code passes the
+    actual input mirror policy explicitly.
+    """
+    pose, left, right = _result_landmark_groups(
+        hand_result,
+        pose_result,
+        pixels_mirrored=pixels_mirrored,
+    )
     full_pose = _landmark_array(pose, 33, "pose")
     full_left = _landmark_array(left, HAND_LANDMARKS, "left hand")
     full_right = _landmark_array(right, HAND_LANDMARKS, "right hand")
@@ -99,9 +125,18 @@ def observation_from_results(hand_result: Any, pose_result: Any) -> FrameObserva
     )
 
 
-def landmarks_from_results(hand_result: Any, pose_result: Any) -> tuple[np.ndarray, np.ndarray]:
-    """Map MediaPipe result objects to the frozen recognizer feature contract."""
-    observation = observation_from_results(hand_result, pose_result)
+def landmarks_from_results(
+    hand_result: Any,
+    pose_result: Any,
+    *,
+    pixels_mirrored: bool = True,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Map MediaPipe results to anatomical slots in the frozen feature contract."""
+    observation = observation_from_results(
+        hand_result,
+        pose_result,
+        pixels_mirrored=pixels_mirrored,
+    )
     return observation.recognition_values, observation.recognition_mask
 
 

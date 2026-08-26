@@ -85,7 +85,11 @@ class Knee42PreprocessingTests(unittest.TestCase):
         )
         pose_result = SimpleNamespace(pose_landmarks=[landmarks(33, 0.0)])
 
-        values, mask = landmarks_from_results(hand_result, pose_result)
+        values, mask = landmarks_from_results(
+            hand_result,
+            pose_result,
+            pixels_mirrored=True,
+        )
 
         left_start = len(POSE_KEEP) * 3
         right_start = left_start + 21 * 3
@@ -105,7 +109,11 @@ class Knee42PreprocessingTests(unittest.TestCase):
         )
         pose_result = SimpleNamespace(pose_landmarks=[landmarks(33, 0.0)])
 
-        observation = observation_from_results(hand_result, pose_result)
+        observation = observation_from_results(
+            hand_result,
+            pose_result,
+            pixels_mirrored=True,
+        )
 
         self.assertEqual(observation.display_pose.shape, (33, 3))
         self.assertEqual(observation.display_left_hand.shape, (21, 3))
@@ -118,10 +126,68 @@ class Knee42PreprocessingTests(unittest.TestCase):
         observation = observation_from_results(
             None,
             SimpleNamespace(pose_landmarks=[landmarks(33, 0.0)]),
+            pixels_mirrored=False,
         )
 
         self.assertTrue(np.isnan(observation.display_left_hand).all())
         self.assertTrue(np.isnan(observation.display_right_hand).all())
+
+    def test_unmirrored_labels_swap_anatomically_independent_of_detection_order(self):
+        anatomical_left = landmarks(21, 1_000.0)
+        anatomical_right = landmarks(21, 2_000.0)
+        pose_result = SimpleNamespace(pose_landmarks=[landmarks(33, 0.0)])
+        expected = None
+        for hand_result in (
+            SimpleNamespace(
+                handedness=[
+                    [SimpleNamespace(category_name="Left")],
+                    [SimpleNamespace(category_name="Right")],
+                ],
+                hand_landmarks=[anatomical_right, anatomical_left],
+            ),
+            SimpleNamespace(
+                handedness=[
+                    [SimpleNamespace(category_name="Right")],
+                    [SimpleNamespace(category_name="Left")],
+                ],
+                hand_landmarks=[anatomical_left, anatomical_right],
+            ),
+        ):
+            values, mask = landmarks_from_results(
+                hand_result,
+                pose_result,
+                pixels_mirrored=False,
+            )
+            if expected is None:
+                expected = values
+            else:
+                np.testing.assert_array_equal(values, expected)
+            left_start = len(POSE_KEEP) * 3
+            right_start = left_start + 21 * 3
+            self.assertEqual(values[left_start], 1_001.0)
+            self.assertEqual(values[right_start], 2_001.0)
+            self.assertTrue(mask.all())
+
+    def test_unknown_or_duplicate_handedness_is_rejected_without_x_guessing(self):
+        pose_result = SimpleNamespace(pose_landmarks=[landmarks(33, 0.0)])
+        for handedness in (
+            [[SimpleNamespace(category_name="Unknown")]],
+            [
+                [SimpleNamespace(category_name="Left")],
+                [SimpleNamespace(category_name="Left")],
+            ],
+        ):
+            hand_result = SimpleNamespace(
+                handedness=handedness,
+                hand_landmarks=[landmarks(21, 9_000.0 + index * 1_000.0) for index in range(len(handedness))],
+            )
+            with self.subTest(handedness=handedness):
+                with self.assertRaisesRegex(ValueError, "handedness|anatomical"):
+                    landmarks_from_results(
+                        hand_result,
+                        pose_result,
+                        pixels_mirrored=False,
+                    )
 
     def test_shoulder_normalization_matches_training_contract(self):
         pose = landmarks(33, 0.0)

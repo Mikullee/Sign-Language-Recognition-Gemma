@@ -14,9 +14,26 @@ from recognition.realtime.knee42_clock import (
     LiveClock,
     VideoClock,
 )
+from recognition.realtime.knee42_orientation import (
+    InputOrientation,
+    RotationSetting,
+    resolve_rotation,
+)
 
 
 DEFAULT_CAMERA_FPS = 30.0
+
+
+def _right_angle_degrees(value: object) -> int:
+    if isinstance(value, bool):
+        raise ValueError(f"video rotation must be a right angle, got {value!r}")
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"video rotation must be a right angle, got {value!r}") from exc
+    if not math.isfinite(numeric) or numeric not in {0.0, 90.0, 180.0, 270.0}:
+        raise ValueError(f"video rotation must be a right angle, got {value!r}")
+    return int(numeric)
 
 
 def apply_video_transform(
@@ -24,11 +41,23 @@ def apply_video_transform(
     rotation_degrees: float,
     *,
     horizontal_mirror: bool = False,
+    input_mirror: bool | None = None,
 ) -> np.ndarray:
-    """Apply explicit container rotation, then an independently approved mirror."""
-    degrees = int(round(float(rotation_degrees))) % 360
-    if degrees not in {0, 90, 180, 270}:
-        raise ValueError(f"video rotation must be a right angle, got {rotation_degrees!r}")
+    """Apply resolved rotation, then an independently declared input mirror.
+
+    ``horizontal_mirror`` remains as the legacy spelling. New source code uses
+    ``input_mirror`` so this model-affecting transform cannot be confused with
+    display-only mirroring.
+    """
+    if input_mirror is not None:
+        if type(input_mirror) is not bool:
+            raise TypeError(f"input_mirror must be bool, got {input_mirror!r}")
+        if horizontal_mirror and horizontal_mirror != input_mirror:
+            raise ValueError("conflicting horizontal_mirror and input_mirror values")
+        horizontal_mirror = input_mirror
+    if type(horizontal_mirror) is not bool:
+        raise TypeError(f"horizontal_mirror must be bool, got {horizontal_mirror!r}")
+    degrees = _right_angle_degrees(rotation_degrees)
     if degrees == 0 and not horizontal_mirror:
         return frame
     turns_counterclockwise = {0: 0, 90: 3, 180: 2, 270: 1}[degrees]
@@ -50,14 +79,21 @@ class OpenCVFrameSource:
         clock: LiveClock | VideoClock,
         rotation_degrees: float = 0.0,
         horizontal_mirror: bool = False,
+        input_mirror: bool | None = None,
     ):
         self._capture = capture
         self._status = status
         self._cv2 = cv2_module
         self._clock = clock
         self._frame_index = 0
-        self._rotation_degrees = rotation_degrees
-        self._horizontal_mirror = horizontal_mirror
+        if input_mirror is None:
+            input_mirror = horizontal_mirror
+        elif horizontal_mirror and horizontal_mirror != input_mirror:
+            raise ValueError("conflicting horizontal_mirror and input_mirror values")
+        if type(input_mirror) is not bool:
+            raise TypeError(f"input_mirror must be bool, got {input_mirror!r}")
+        self._rotation_degrees = _right_angle_degrees(rotation_degrees)
+        self._input_mirror = input_mirror
 
     @property
     def status(self) -> str:
@@ -68,8 +104,17 @@ class OpenCVFrameSource:
         return float(self._rotation_degrees)
 
     @property
+    def resolved_rotation(self) -> int:
+        return int(self._rotation_degrees)
+
+    @property
+    def input_mirror(self) -> bool:
+        return bool(self._input_mirror)
+
+    @property
     def horizontal_mirror(self) -> bool:
-        return bool(self._horizontal_mirror)
+        """Legacy alias for the declared model-input mirror."""
+        return self.input_mirror
 
     @property
     def fps(self) -> float:
@@ -110,7 +155,7 @@ class OpenCVFrameSource:
         transformed = apply_video_transform(
             frame,
             self._rotation_degrees,
-            horizontal_mirror=self._horizontal_mirror,
+            input_mirror=self._input_mirror,
         )
         return FramePacket(
             frame=transformed,
@@ -148,8 +193,19 @@ def open_camera(
     cv2_module: Any | None = None,
     platform_name: str | None = None,
     perf_counter: Callable[[], float] | None = None,
+    rotation: RotationSetting = "auto",
+    input_mirror: bool = False,
 ) -> OpenCVFrameSource:
     """Open an explicit camera or probe indices 0..max_index without leaking handles."""
+    orientation = InputOrientation(
+        rotation=rotation,
+        input_mirror=input_mirror,
+        display_mirror=False,
+    )
+    resolved_rotation = resolve_rotation(
+        orientation.rotation,
+        source_kind="camera",
+    )
     cv2_module = _load_cv2(cv2_module)
     platform_name = platform_name or sys.platform
     if max_index < 0:
@@ -166,6 +222,8 @@ def open_camera(
                 f"camera:{index}",
                 cv2_module,
                 clock=clock,
+                rotation_degrees=resolved_rotation,
+                input_mirror=orientation.input_mirror,
             )
         capture.release()
     if camera_index is not None:
@@ -177,8 +235,15 @@ def open_video(
     path: Path,
     *,
     cv2_module: Any | None = None,
+    rotation: RotationSetting = "auto",
+    input_mirror: bool = False,
 ) -> OpenCVFrameSource:
     """Open a color video through the same read/release/fps interface as a camera."""
+    orientation = InputOrientation(
+        rotation=rotation,
+        input_mirror=input_mirror,
+        display_mirror=False,
+    )
     cv2_module = _load_cv2(cv2_module)
     path = Path(path)
     if not path.is_file():
@@ -192,15 +257,29 @@ def open_video(
     except (TypeError, ValueError):
         capture.release()
         raise
-    orientation_meta = getattr(cv2_module, "CAP_PROP_ORIENTATION_META", None)
-    rotation_degrees = float(capture.get(orientation_meta)) if orientation_meta is not None else 0.0
     orientation_auto = getattr(cv2_module, "CAP_PROP_ORIENTATION_AUTO", None)
     if orientation_auto is not None and hasattr(capture, "set"):
         capture.set(orientation_auto, 0)
+    try:
+        orientation_meta = getattr(cv2_module, "CAP_PROP_ORIENTATION_META", None)
+        metadata_rotation = (
+            capture.get(orientation_meta)
+            if orientation.rotation == "auto" and orientation_meta is not None
+            else 0
+        )
+        rotation_degrees = resolve_rotation(
+            orientation.rotation,
+            source_kind="video",
+            metadata_rotation=metadata_rotation,
+        )
+    except BaseException:
+        capture.release()
+        raise
     return OpenCVFrameSource(
         capture,
         f"video:{path}",
         cv2_module,
         clock=clock,
         rotation_degrees=rotation_degrees,
+        input_mirror=orientation.input_mirror,
     )

@@ -29,6 +29,13 @@ from recognition.realtime.knee42_integrity import (
     parse_sha256_manifest,
     sha256_file,
 )
+from recognition.realtime.knee42_orientation import (
+    InputOrientation,
+    MirrorMode,
+    RotationSetting,
+    parse_rotation,
+    resolve_rotation,
+)
 from recognition.realtime.knee42_session_recording import SegmentSessionRecorder
 from recognition.realtime.knee42_preprocessing import (
     FrameObservation,
@@ -368,8 +375,11 @@ def auto_display_state(state: str, *, calibrated: bool) -> str:
 
 
 class MediapipeDetectors:
-    def __init__(self, bundle: Knee42Bundle):
+    def __init__(self, bundle: Knee42Bundle, *, pixels_mirrored: bool = True):
+        if type(pixels_mirrored) is not bool:
+            raise TypeError(f"pixels_mirrored must be bool, got {pixels_mirrored!r}")
         self.bundle = bundle
+        self.pixels_mirrored = pixels_mirrored
         self._stack: ExitStack | None = None
         self._mp = None
         self._hands = None
@@ -413,7 +423,11 @@ class MediapipeDetectors:
 
         rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
         image = self._mp.Image(image_format=self._mp.ImageFormat.SRGB, data=rgb)
-        observation = observation_from_results(self._hands.detect(image), self._pose.detect(image))
+        observation = observation_from_results(
+            self._hands.detect(image),
+            self._pose.detect(image),
+            pixels_mirrored=self.pixels_mirrored,
+        )
         return FrameObservation(
             trigger_values=observation.trigger_values,
             recognition_values=normalize_frame(
@@ -432,8 +446,12 @@ class MediapipeDetectors:
         return False
 
 
-def create_mediapipe_detectors(bundle: Knee42Bundle) -> MediapipeDetectors:
-    return MediapipeDetectors(bundle)
+def create_mediapipe_detectors(
+    bundle: Knee42Bundle,
+    *,
+    pixels_mirrored: bool = True,
+) -> MediapipeDetectors:
+    return MediapipeDetectors(bundle, pixels_mirrored=pixels_mirrored)
 
 
 def run_self_test(
@@ -535,6 +553,35 @@ class HeldObservationBatch:
         self._timestamps.clear()
 
 
+def _mirrored_display_landmarks(landmarks: np.ndarray | None) -> np.ndarray | None:
+    if landmarks is None:
+        return None
+    mirrored = np.asarray(landmarks, dtype=np.float32).copy()
+    if mirrored.ndim != 2 or mirrored.shape[1] != 3:
+        raise ValueError(f"display landmarks must be Nx3, got {mirrored.shape}")
+    mirrored[:, 0] = 1.0 - mirrored[:, 0]
+    return mirrored
+
+
+def _display_orientation(
+    frame: np.ndarray,
+    pose: np.ndarray | None,
+    left_hand: np.ndarray | None,
+    right_hand: np.ndarray | None,
+    *,
+    display_mirror: bool,
+) -> tuple[np.ndarray, np.ndarray | None, np.ndarray | None, np.ndarray | None]:
+    """Return display-only mirrored copies without touching detector/model data."""
+    if not display_mirror:
+        return frame, pose, left_hand, right_hand
+    return (
+        np.ascontiguousarray(np.flip(np.asarray(frame), axis=1)),
+        _mirrored_display_landmarks(pose),
+        _mirrored_display_landmarks(left_hand),
+        _mirrored_display_landmarks(right_hand),
+    )
+
+
 def run_capture(
     bundle_dir: Path,
     *,
@@ -548,18 +595,68 @@ def run_capture(
     inference_stride: int = 8,
     recordings_dir: Path = Path("recordings"),
     start_logging: bool = False,
+    rotation: RotationSetting = "auto",
+    input_mirror: bool = False,
+    display_mirror: bool = False,
 ) -> dict[str, Any]:
     import cv2
 
+    orientation = InputOrientation(
+        rotation=rotation,
+        input_mirror=input_mirror,
+        display_mirror=display_mirror,
+    )
     verify_auto_trigger_provenance(Path(bundle_dir).resolve().parent)
     bundle = load_bundle(bundle_dir, device=device)
-    source = open_video(video, cv2_module=cv2) if video is not None else open_camera(
-        camera_index,
-        max_index=max_camera_index,
-        cv2_module=cv2,
+    source = (
+        open_video(
+            video,
+            rotation=orientation.rotation,
+            input_mirror=orientation.input_mirror,
+            cv2_module=cv2,
+        )
+        if video is not None
+        else open_camera(
+            camera_index,
+            max_index=max_camera_index,
+            rotation=orientation.rotation,
+            input_mirror=orientation.input_mirror,
+            cv2_module=cv2,
+        )
     )
     cleanup_stack = ExitStack()
     cleanup_stack.callback(source.release)
+    try:
+        source_input_mirror = getattr(source, "input_mirror", orientation.input_mirror)
+        if type(source_input_mirror) is not bool:
+            raise TypeError(
+                f"source input_mirror must be bool, got {source_input_mirror!r}"
+            )
+        fallback_rotation = resolve_rotation(
+            orientation.rotation,
+            source_kind="video" if video is not None else "camera",
+            metadata_rotation=0,
+        )
+        source_rotation_value = getattr(
+            source,
+            "resolved_rotation",
+            getattr(source, "rotation_degrees", fallback_rotation),
+        )
+        if isinstance(source_rotation_value, bool):
+            raise ValueError(
+                "source resolved_rotation must be a right angle, "
+                f"got {source_rotation_value!r}"
+            )
+        source_rotation_numeric = float(source_rotation_value)
+        if source_rotation_numeric not in {0.0, 90.0, 180.0, 270.0}:
+            raise ValueError(
+                "source resolved_rotation must be a right angle, "
+                f"got {source_rotation_value!r}"
+            )
+        source_resolved_rotation = int(source_rotation_numeric)
+    except BaseException as exc:
+        cleanup_stack.__exit__(type(exc), exc, exc.__traceback__)
+        raise
     try:
         if mode in {"auto", "manual"}:
             trigger_config_path = bundle.root.parent / "auto_trigger_knee_ivcam_local.json"
@@ -656,7 +753,10 @@ def run_capture(
         )
 
     try:
-        with create_mediapipe_detectors(bundle) as detectors:
+        with create_mediapipe_detectors(
+            bundle,
+            pixels_mirrored=source_input_mirror,
+        ) as detectors:
             while max_frames is None or raw_frames < max_frames:
                 packet = source.read_packet()
                 if packet is None:
@@ -733,8 +833,20 @@ def run_capture(
                             if last_result is not None and controller.state == "FORCED_FINALIZE_COOLDOWN"
                             else auto_display_state(controller.state, calibrated=controller.calibrated)
                         )
-                    view, _layout = render_application_view(
+                    (
+                        display_frame,
+                        display_pose,
+                        display_left_hand,
+                        display_right_hand,
+                    ) = _display_orientation(
                         frame,
+                        latest_display_pose,
+                        latest_display_left_hand,
+                        latest_display_right_hand,
+                        display_mirror=orientation.display_mirror,
+                    )
+                    view, _layout = render_application_view(
+                        display_frame,
                         display.content_size(cv2),
                         build_display_panel_data(
                             last_result,
@@ -748,9 +860,9 @@ def run_capture(
                             ),
                             model_version=bundle.model_display_version,
                         ),
-                        pose=latest_display_pose,
-                        left_hand=latest_display_left_hand,
-                        right_hand=latest_display_right_hand,
+                        pose=display_pose,
+                        left_hand=display_left_hand,
+                        right_hand=display_right_hand,
                         cv2_module=cv2,
                     )
                     cv2.imshow("Knee42 IVCAM RGB", view)
@@ -829,6 +941,10 @@ def run_capture(
     output = {
         "source": source.status,
         "clock_mode": source.clock_mode,
+        "rotation": orientation.rotation,
+        "resolved_rotation": source_resolved_rotation,
+        "input_mirror": source_input_mirror,
+        "display_mirror": orientation.display_mirror,
         "mode": controller.mode if isinstance(controller, AutoKnee42Controller) else "sliding",
         "raw_frames": raw_frames,
         "feature_frames": feature_frames,
@@ -861,6 +977,24 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--camera-index", type=int)
     parser.add_argument("--max-camera-index", type=int, default=9)
     parser.add_argument("--video", type=Path)
+    parser.add_argument(
+        "--rotation",
+        choices=("auto", "0", "90", "180", "270"),
+        default="auto",
+        help="model-input rotation (default: auto; video metadata, camera 0)",
+    )
+    parser.add_argument(
+        "--input-mirror",
+        choices=("off", "on"),
+        default="off",
+        help="mirror detector/model input pixels (default: off)",
+    )
+    parser.add_argument(
+        "--display-mirror",
+        choices=("off", "on"),
+        default="off",
+        help="mirror only the rendered operator view (default: off)",
+    )
     parser.add_argument("--device", choices=("cpu", "cuda", "auto"), default="auto")
     parser.add_argument("--self-test", action="store_true")
     parser.add_argument("--headless", action="store_true")
@@ -889,6 +1023,9 @@ def main(argv: Sequence[str] | None = None) -> None:
             inference_stride=args.inference_stride,
             recordings_dir=args.recordings_dir,
             start_logging=args.start_logging,
+            rotation=parse_rotation(args.rotation),
+            input_mirror=MirrorMode.parse(args.input_mirror).enabled,
+            display_mirror=MirrorMode.parse(args.display_mirror).enabled,
         )
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
