@@ -169,10 +169,22 @@ class ReleaseSpecTests(unittest.TestCase):
     def test_release_spec_pins_required_release_and_model_layouts(self):
         spec = load_release_spec(SPEC_PATH)
 
-        self.assertIn("VERSION_MANIFEST.json", spec.required_release_root)
-        self.assertIn(
-            "packaging/knee42_ivcam/release_spec.json",
+        self.assertEqual(
             spec.required_release_root,
+            (
+                "VERSION_MANIFEST.json",
+                "LICENSE",
+                "THIRD_PARTY_NOTICES.md",
+                "INSTALL_zh-TW.md",
+                "MODEL_CARD.md",
+                "MODEL_LICENSE.md",
+                "requirements-windows-runtime.lock.txt",
+                "start_ivcam.cmd",
+                "auto_trigger_knee_ivcam_local.json",
+                "auto_trigger_provenance.json",
+                "golden_contract.json",
+                "packaging/knee42_ivcam/release_spec.json",
+            ),
         )
         self.assertEqual(
             set(spec.required_model_layout),
@@ -297,6 +309,15 @@ class ReleaseRootVerificationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             root, spec = make_valid_root(Path(temp_dir))
             (root / "surprise.exe").write_bytes(b"x")
+
+            with self.assertRaisesRegex(IntegrityError, "unexpected.*surprise.exe"):
+                verify_release_root(root, spec=spec)
+
+    def test_root_manifest_rejects_listed_and_hashed_surprise_executable(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root, spec = make_valid_root(Path(temp_dir))
+            (root / "surprise.exe").write_bytes(b"x")
+            rewrite_root_manifest(root)
 
             with self.assertRaisesRegex(IntegrityError, "unexpected.*surprise.exe"):
                 verify_release_root(root, spec=spec)

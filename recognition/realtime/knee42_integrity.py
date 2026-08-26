@@ -471,27 +471,21 @@ def verify_release_root(
     if "integrity_manifest.sha256" in hashes:
         raise IntegrityError("integrity manifest must not list itself: integrity_manifest.sha256")
 
-    required = set(trusted_spec.required_release_root)
-    required.update(f"model/{name}" for name in trusted_spec.required_model_layout)
-    missing_required = sorted(required - set(hashes))
-    if missing_required:
-        raise IntegrityError(f"integrity manifest missing required path(s): {missing_required}")
-
-    listed_model = {
-        relative.removeprefix("model/")
-        for relative in hashes
-        if relative.startswith("model/")
-    }
-    expected_model = set(trusted_spec.required_model_layout)
-    missing_model = sorted(expected_model - listed_model)
-    unexpected_model = sorted(f"model/{name}" for name in listed_model - expected_model)
-    if missing_model:
+    expected_manifest_paths = set(trusted_spec.required_release_root)
+    expected_manifest_paths.update(
+        f"model/{name}" for name in trusted_spec.required_model_layout
+    )
+    manifest_paths = set(hashes)
+    missing_manifest_paths = sorted(expected_manifest_paths - manifest_paths)
+    unexpected_manifest_paths = sorted(manifest_paths - expected_manifest_paths)
+    if missing_manifest_paths:
         raise IntegrityError(
-            "integrity manifest missing model path(s): "
-            f"{[f'model/{name}' for name in missing_model]}"
+            f"integrity manifest missing required path(s): {missing_manifest_paths}"
         )
-    if unexpected_model:
-        raise IntegrityError(f"integrity manifest has unexpected model path(s): {unexpected_model}")
+    if unexpected_manifest_paths:
+        raise IntegrityError(
+            f"integrity manifest has unexpected path(s): {unexpected_manifest_paths}"
+        )
 
     canonical_hashes = {
         "packaging/knee42_ivcam/release_spec.json": trusted_spec.source_sha256,
