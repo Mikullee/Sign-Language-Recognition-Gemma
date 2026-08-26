@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
@@ -23,6 +25,13 @@ DEFAULT_RELEASE_SPEC_PATH = (
     / "packaging"
     / "knee42_ivcam"
     / "release_spec.json"
+)
+VERIFIER_REQUIRED_RELEASE_PATHS = frozenset(
+    {
+        "VERSION_MANIFEST.json",
+        "requirements-windows-runtime.lock.txt",
+        "packaging/knee42_ivcam/release_spec.json",
+    }
 )
 
 
@@ -53,6 +62,35 @@ class ReleaseSpec:
     required_model_layout: tuple[str, ...]
     license_identifiers: Mapping[str, str]
 
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "input_shape", tuple(self.input_shape))
+        object.__setattr__(
+            self,
+            "artifact_names",
+            MappingProxyType(dict(self.artifact_names)),
+        )
+        object.__setattr__(self, "assets", MappingProxyType(dict(self.assets)))
+        object.__setattr__(
+            self,
+            "model_files",
+            MappingProxyType(dict(self.model_files)),
+        )
+        object.__setattr__(
+            self,
+            "required_release_root",
+            tuple(self.required_release_root),
+        )
+        object.__setattr__(
+            self,
+            "required_model_layout",
+            tuple(self.required_model_layout),
+        )
+        object.__setattr__(
+            self,
+            "license_identifiers",
+            MappingProxyType(dict(self.license_identifiers)),
+        )
+
 
 @dataclass(frozen=True)
 class VerifiedRelease:
@@ -66,6 +104,14 @@ class VerifiedRelease:
     dependency_lock_sha256: str
     root_manifest_sha256: str
     file_hashes: Mapping[str, str]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "input_shape", tuple(self.input_shape))
+        object.__setattr__(
+            self,
+            "file_hashes",
+            MappingProxyType(dict(self.file_hashes)),
+        )
 
 
 def sha256_file(path: Path) -> str:
@@ -189,7 +235,7 @@ def load_release_spec(path: Path) -> ReleaseSpec:
     spec_path = Path(path)
     payload = _read_json_object(spec_path, description="release spec")
     try:
-        source_sha256 = sha256_file(spec_path)
+        source_sha256 = _sha256_lf_normalized_file(spec_path)
     except OSError as exc:
         raise IntegrityError(f"cannot hash release spec {spec_path}: {exc}") from exc
     expected_fields = {
@@ -311,8 +357,14 @@ def load_release_spec(path: Path) -> ReleaseSpec:
         description="release spec required model layout",
         basenames_only=True,
     )
-    if "VERSION_MANIFEST.json" not in required_release_root:
-        raise IntegrityError("release spec required release-root layout lacks VERSION_MANIFEST.json")
+    missing_verifier_paths = sorted(
+        VERIFIER_REQUIRED_RELEASE_PATHS - set(required_release_root)
+    )
+    if missing_verifier_paths:
+        raise IntegrityError(
+            "release spec required release-root layout omits verifier-required path(s): "
+            f"{missing_verifier_paths}"
+        )
     if not set(model_files).issubset(required_model_layout):
         missing = sorted(set(model_files) - set(required_model_layout))
         raise IntegrityError(f"release spec required model layout omits model file(s): {missing}")
@@ -372,6 +424,10 @@ def parse_sha256_manifest(path: Path) -> Mapping[str, str]:
             raise IntegrityError(f"malformed SHA-256 manifest line {line_number}")
         digest = match.group(1).lower()
         raw_path = match.group(3)
+        if match.group(2) or "*" in raw_path:
+            raise IntegrityError(
+                f"ambiguous GNU '*' manifest syntax or filename at line {line_number}"
+            )
         if raw_path != raw_path.strip():
             raise IntegrityError(f"malformed SHA-256 manifest path at line {line_number}")
         normalized = _normalize_relative_path(raw_path, description="unsafe integrity")
@@ -390,16 +446,41 @@ def parse_sha256_manifest(path: Path) -> Mapping[str, str]:
 
 def _relative_files(root: Path) -> set[str]:
     files: set[str] = set()
-    try:
-        paths = list(root.rglob("*"))
-    except OSError as exc:
-        raise IntegrityError(f"cannot enumerate release root {root}: {exc}") from exc
-    for path in paths:
-        relative = path.relative_to(root).as_posix()
-        if path.is_symlink():
-            raise IntegrityError(f"unexpected symbolic link: {relative}")
-        if path.is_file():
-            files.add(relative)
+    pending: list[tuple[Path, str]] = [(root, "")]
+    reparse_attribute = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x0400)
+    while pending:
+        directory, prefix = pending.pop()
+        try:
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    relative = f"{prefix}/{entry.name}" if prefix else entry.name
+                    try:
+                        metadata = entry.stat(follow_symlinks=False)
+                    except OSError as exc:
+                        raise IntegrityError(
+                            f"cannot inspect release path {relative}: {exc}"
+                        ) from exc
+                    is_reparse = bool(
+                        getattr(metadata, "st_file_attributes", 0)
+                        & reparse_attribute
+                    )
+                    if stat.S_ISLNK(metadata.st_mode) or is_reparse:
+                        raise IntegrityError(
+                            f"unexpected symbolic link or reparse point: {relative}"
+                        )
+                    if stat.S_ISDIR(metadata.st_mode):
+                        pending.append((Path(entry.path), relative))
+                    elif stat.S_ISREG(metadata.st_mode):
+                        files.add(relative)
+                    else:
+                        raise IntegrityError(f"unexpected non-regular path: {relative}")
+        except IntegrityError:
+            raise
+        except OSError as exc:
+            location = prefix or "."
+            raise IntegrityError(
+                f"cannot enumerate release path {location}: {exc}"
+            ) from exc
     return files
 
 
@@ -415,6 +496,15 @@ def _validate_version_manifest(path: Path, spec: ReleaseSpec) -> dict[str, Any]:
         "dependency_lock_sha256",
     }
     _require_exact_fields(payload, expected_fields, description="VERSION_MANIFEST.json")
+    input_shape = payload["input_shape"]
+    if (
+        type(input_shape) is not list
+        or len(input_shape) != len(spec.input_shape)
+        or any(type(item) is not int for item in input_shape)
+    ):
+        raise IntegrityError(
+            "VERSION_MANIFEST.json input_shape must contain exactly three integers"
+        )
     expected_values: dict[str, Any] = {
         "release_version": spec.release_version,
         "app_version": spec.app_version,
@@ -442,15 +532,32 @@ def _validate_version_manifest(path: Path, spec: ReleaseSpec) -> dict[str, Any]:
 def verify_release_root(
     root: Path,
     *,
+    expected_root_manifest_sha256: str,
     spec: ReleaseSpec | None = None,
 ) -> VerifiedRelease:
     """Verify every listed release file, reject extras, and validate version lineage."""
+    trusted_manifest_hash = _require_sha256(
+        expected_root_manifest_sha256,
+        description="expected_root_manifest_sha256",
+    )
     release_root = Path(root).resolve()
     if not release_root.is_dir():
         raise IntegrityError(f"release root missing or not a directory: {release_root}")
+    actual = _relative_files(release_root)
     manifest_path = release_root / "integrity_manifest.sha256"
     if not manifest_path.is_file():
         raise IntegrityError("missing path: integrity_manifest.sha256")
+    try:
+        actual_manifest_hash = sha256_file(manifest_path)
+    except OSError as exc:
+        raise IntegrityError(
+            f"cannot hash root integrity manifest {manifest_path}: {exc}"
+        ) from exc
+    if actual_manifest_hash != trusted_manifest_hash:
+        raise IntegrityError(
+            "root integrity manifest SHA-256 mismatch for integrity_manifest.sha256: "
+            f"expected {trusted_manifest_hash}, actual {actual_manifest_hash}"
+        )
 
     if spec is None:
         try:
@@ -487,8 +594,22 @@ def verify_release_root(
             f"integrity manifest has unexpected path(s): {unexpected_manifest_paths}"
         )
 
+    packaged_spec_relative = "packaging/knee42_ivcam/release_spec.json"
+    try:
+        actual_packaged_spec_hash = _sha256_lf_normalized_file(
+            release_root.joinpath(*packaged_spec_relative.split("/"))
+        )
+    except OSError as exc:
+        raise IntegrityError(
+            f"cannot hash release path {packaged_spec_relative}: {exc}"
+        ) from exc
+    if actual_packaged_spec_hash != trusted_spec.source_sha256:
+        raise IntegrityError(
+            f"canonical SHA-256 mismatch for {packaged_spec_relative}: "
+            f"expected {trusted_spec.source_sha256}, actual {actual_packaged_spec_hash}"
+        )
+
     canonical_hashes = {
-        "packaging/knee42_ivcam/release_spec.json": trusted_spec.source_sha256,
         **{
             f"model/{filename}": digest
             for filename, digest in trusted_spec.model_files.items()
@@ -506,7 +627,6 @@ def verify_release_root(
                 f"expected {wanted}, manifest declares {declared}"
             )
 
-    actual = _relative_files(release_root)
     expected = set(hashes) | {"integrity_manifest.sha256"}
     missing = sorted(expected - actual)
     unexpected = sorted(actual - expected)
@@ -546,6 +666,6 @@ def verify_release_root(
         input_shape=trusted_spec.input_shape,
         source_commit=version["source_commit"],
         dependency_lock_sha256=version["dependency_lock_sha256"],
-        root_manifest_sha256=sha256_file(manifest_path),
+        root_manifest_sha256=actual_manifest_hash,
         file_hashes=MappingProxyType(dict(hashes)),
     )

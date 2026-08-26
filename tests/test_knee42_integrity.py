@@ -3,7 +3,9 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import json
+import os
 import re
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path, PurePosixPath
@@ -212,6 +214,112 @@ class ReleaseSpecTests(unittest.TestCase):
         with self.assertRaises(dataclasses.FrozenInstanceError):
             spec.assets["model_archive"].sha256 = "0" * 64  # type: ignore[misc]
 
+    def test_release_spec_source_sha256_normalizes_lf_and_crlf(self):
+        normalized = SPEC_PATH.read_bytes().replace(b"\r\n", b"\n")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            directory = Path(temp_dir)
+            lf_path = directory / "release-spec-lf.json"
+            crlf_path = directory / "release-spec-crlf.json"
+            lf_path.write_bytes(normalized)
+            crlf_path.write_bytes(normalized.replace(b"\n", b"\r\n"))
+
+            lf_spec = load_release_spec(lf_path)
+            crlf_spec = load_release_spec(crlf_path)
+
+        expected = hashlib.sha256(normalized).hexdigest()
+        self.assertEqual(lf_spec.source_sha256, expected)
+        self.assertEqual(crlf_spec.source_sha256, expected)
+
+    def test_direct_dataclass_construction_deep_freezes_collections(self):
+        loaded = load_release_spec(SPEC_PATH)
+        input_shape = list(loaded.input_shape)
+        artifact_names = dict(loaded.artifact_names)
+        assets = dict(loaded.assets)
+        model_files = dict(loaded.model_files)
+        required_release_root = list(loaded.required_release_root)
+        required_model_layout = list(loaded.required_model_layout)
+        license_identifiers = dict(loaded.license_identifiers)
+        direct_spec = ReleaseSpec(
+            source_sha256=loaded.source_sha256,
+            release_version=loaded.release_version,
+            app_version=loaded.app_version,
+            model_version=loaded.model_version,
+            label_count=loaded.label_count,
+            input_shape=input_shape,  # type: ignore[arg-type]
+            artifact_names=artifact_names,
+            assets=assets,
+            model_files=model_files,
+            required_release_root=required_release_root,  # type: ignore[arg-type]
+            required_model_layout=required_model_layout,  # type: ignore[arg-type]
+            license_identifiers=license_identifiers,
+        )
+
+        input_shape[0] = 9
+        artifact_names["source_runtime"] = "changed.zip"
+        assets.clear()
+        model_files.clear()
+        required_release_root.clear()
+        required_model_layout.clear()
+        license_identifiers.clear()
+
+        self.assertEqual(direct_spec.input_shape, loaded.input_shape)
+        self.assertEqual(direct_spec.artifact_names, loaded.artifact_names)
+        self.assertEqual(direct_spec.assets, loaded.assets)
+        self.assertEqual(direct_spec.model_files, loaded.model_files)
+        self.assertEqual(
+            direct_spec.required_release_root,
+            loaded.required_release_root,
+        )
+        self.assertEqual(direct_spec.required_model_layout, loaded.required_model_layout)
+        self.assertEqual(direct_spec.license_identifiers, loaded.license_identifiers)
+        with self.assertRaises(TypeError):
+            direct_spec.model_files["extra.bin"] = "0" * 64  # type: ignore[index]
+
+        verified_shape = [1, 64, 438]
+        file_hashes = {"MODEL_CARD.md": "a" * 64}
+        verified = VerifiedRelease(
+            root=Path("release"),
+            release_version="v1.0.1-v13.1",
+            app_version="v13.1",
+            model_version="v11",
+            label_count=42,
+            input_shape=verified_shape,  # type: ignore[arg-type]
+            source_commit="b" * 40,
+            dependency_lock_sha256="c" * 64,
+            root_manifest_sha256="d" * 64,
+            file_hashes=file_hashes,
+        )
+        verified_shape[1] = 1
+        file_hashes.clear()
+
+        self.assertEqual(verified.input_shape, (1, 64, 438))
+        self.assertEqual(verified.file_hashes, {"MODEL_CARD.md": "a" * 64})
+        with self.assertRaises(TypeError):
+            verified.file_hashes["extra.bin"] = "0" * 64  # type: ignore[index]
+
+        asset = AssetSpec("asset.bin", "https://example.test", "e" * 64, "MIT")
+        with self.assertRaises(dataclasses.FrozenInstanceError):
+            asset.filename = "changed.bin"  # type: ignore[misc]
+
+    def test_release_spec_requires_every_verifier_runtime_path(self):
+        required_paths = (
+            "VERSION_MANIFEST.json",
+            "requirements-windows-runtime.lock.txt",
+            "packaging/knee42_ivcam/release_spec.json",
+        )
+        canonical = json.loads(SPEC_PATH.read_text(encoding="utf-8"))
+        with tempfile.TemporaryDirectory() as temp_dir:
+            directory = Path(temp_dir)
+            for index, missing in enumerate(required_paths):
+                with self.subTest(missing=missing):
+                    payload = json.loads(json.dumps(canonical))
+                    payload["required_layouts"]["release_root"].remove(missing)
+                    path = directory / f"missing-{index}.json"
+                    path.write_text(json.dumps(payload), encoding="utf-8")
+
+                    with self.assertRaisesRegex(IntegrityError, re.escape(missing)):
+                        load_release_spec(path)
+
     def test_release_spec_rejects_malformed_schema_types_and_values(self):
         canonical = json.loads(SPEC_PATH.read_text(encoding="utf-8"))
         mutations = {
@@ -249,12 +357,23 @@ class ManifestParserTests(unittest.TestCase):
             return parse_sha256_manifest(path)
 
     def test_parser_accepts_sha256sum_text_and_normalizes_separators(self):
-        parsed = self.parse(f"{'a' * 64}  folder\\file.bin\n{'b' * 64} *other.bin\n")
+        parsed = self.parse(f"{'a' * 64}  folder\\file.bin\n{'b' * 64}  other.bin\n")
 
         self.assertEqual(
             dict(parsed),
             {"folder/file.bin": "a" * 64, "other.bin": "b" * 64},
         )
+
+    def test_parser_rejects_ambiguous_gnu_star_syntax_and_filenames(self):
+        ambiguous = (
+            f"{'a' * 64} *binary-marker.bin\n",
+            f"{'a' * 64}  *star-prefixed-name.bin\n",
+            f"{'a' * 64}  folder/name*.bin\n",
+        )
+        for text in ambiguous:
+            with self.subTest(text=text):
+                with self.assertRaisesRegex(IntegrityError, r"ambiguous GNU '\*'.*line 1"):
+                    self.parse(text)
 
     def test_parser_rejects_malformed_lines_and_hashes(self):
         malformed = (
@@ -291,10 +410,61 @@ class ManifestParserTests(unittest.TestCase):
 
 
 class ReleaseRootVerificationTests(unittest.TestCase):
+    def test_root_manifest_trust_anchor_requires_lowercase_sha256(self):
+        invalid_digests = ("a" * 63, "A" * 64, "g" * 64, True)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root, spec = make_valid_root(Path(temp_dir))
+            for invalid in invalid_digests:
+                with self.subTest(digest=invalid):
+                    with self.assertRaisesRegex(
+                        IntegrityError,
+                        "expected_root_manifest_sha256",
+                    ):
+                        verify_release_root(
+                            root,
+                            expected_root_manifest_sha256=invalid,  # type: ignore[arg-type]
+                            spec=spec,
+                        )
+
+    def test_trusted_root_manifest_digest_rejects_regeneration_before_parsing(self):
+        changed_paths = (
+            "start_ivcam.cmd",
+            "requirements-windows-runtime.lock.txt",
+            "VERSION_MANIFEST.json",
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            parent = Path(temp_dir)
+            for index, relative in enumerate(changed_paths):
+                with self.subTest(path=relative):
+                    root, spec = make_valid_root(parent / str(index))
+                    trusted_digest = sha256(root / "integrity_manifest.sha256")
+                    changed = release_path(root, relative)
+                    changed.write_bytes(changed.read_bytes() + b"\n")
+                    rewrite_root_manifest(root)
+
+                    with mock.patch.object(
+                        knee42_integrity,
+                        "parse_sha256_manifest",
+                        side_effect=AssertionError("manifest must not be parsed"),
+                    ) as parser:
+                        with self.assertRaisesRegex(
+                            IntegrityError,
+                            "root integrity manifest SHA-256 mismatch",
+                        ):
+                            verify_release_root(
+                                root,
+                                expected_root_manifest_sha256=trusted_digest,
+                                spec=spec,
+                            )
+                    parser.assert_not_called()
+
     def test_missing_manifest_names_the_missing_path(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             with self.assertRaisesRegex(IntegrityError, "integrity_manifest.sha256"):
-                verify_release_root(Path(temp_dir))
+                verify_release_root(
+                    Path(temp_dir),
+                    expected_root_manifest_sha256="0" * 64,
+                )
 
     def test_root_manifest_rejects_missing_file(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -303,7 +473,13 @@ class ReleaseRootVerificationTests(unittest.TestCase):
             missing.unlink()
 
             with self.assertRaisesRegex(IntegrityError, "missing.*model/best_model.pt"):
-                verify_release_root(root, spec=spec)
+                verify_release_root(
+                    root,
+                    expected_root_manifest_sha256=sha256(
+                        root / "integrity_manifest.sha256"
+                    ),
+                    spec=spec,
+                )
 
     def test_root_manifest_rejects_unlisted_surprise_executable(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -311,7 +487,13 @@ class ReleaseRootVerificationTests(unittest.TestCase):
             (root / "surprise.exe").write_bytes(b"x")
 
             with self.assertRaisesRegex(IntegrityError, "unexpected.*surprise.exe"):
-                verify_release_root(root, spec=spec)
+                verify_release_root(
+                    root,
+                    expected_root_manifest_sha256=sha256(
+                        root / "integrity_manifest.sha256"
+                    ),
+                    spec=spec,
+                )
 
     def test_root_manifest_rejects_listed_and_hashed_surprise_executable(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -320,7 +502,13 @@ class ReleaseRootVerificationTests(unittest.TestCase):
             rewrite_root_manifest(root)
 
             with self.assertRaisesRegex(IntegrityError, "unexpected.*surprise.exe"):
-                verify_release_root(root, spec=spec)
+                verify_release_root(
+                    root,
+                    expected_root_manifest_sha256=sha256(
+                        root / "integrity_manifest.sha256"
+                    ),
+                    spec=spec,
+                )
 
     def test_root_manifest_rejects_changed_byte_and_names_path(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -329,7 +517,102 @@ class ReleaseRootVerificationTests(unittest.TestCase):
             changed.write_bytes(changed.read_bytes() + b"x")
 
             with self.assertRaisesRegex(IntegrityError, "mismatch.*MODEL_CARD.md"):
-                verify_release_root(root, spec=spec)
+                verify_release_root(
+                    root,
+                    expected_root_manifest_sha256=sha256(
+                        root / "integrity_manifest.sha256"
+                    ),
+                    spec=spec,
+                )
+
+    @unittest.skipIf(os.name == "nt", "POSIX symlink contract")
+    def test_root_rejects_posix_directory_symlink_before_traversal(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            parent = Path(temp_dir)
+            root, spec = make_valid_root(parent / "release")
+            model = root / "model"
+            outside_model = parent / "outside-model"
+            model.rename(outside_model)
+            model.symlink_to(outside_model, target_is_directory=True)
+            try:
+                with self.assertRaisesRegex(
+                    IntegrityError,
+                    r"(symbolic link|reparse point).*model",
+                ):
+                    verify_release_root(
+                        root,
+                        expected_root_manifest_sha256=sha256(
+                            root / "integrity_manifest.sha256"
+                        ),
+                        spec=spec,
+                    )
+            finally:
+                if os.path.lexists(model):
+                    model.unlink()
+
+    @unittest.skipUnless(os.name == "nt", "Windows NTFS junction contract")
+    def test_root_rejects_windows_model_junction_before_traversal(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            parent = Path(temp_dir)
+            root, spec = make_valid_root(parent / "release")
+            model = root / "model"
+            outside_model = parent / "outside-model"
+            model.rename(outside_model)
+            completed = subprocess.run(
+                ["cmd.exe", "/d", "/c", "mklink", "/J", str(model), str(outside_model)],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            if completed.returncode != 0:
+                self.skipTest(f"cannot create NTFS junction: {completed.stderr}")
+            try:
+                with self.assertRaisesRegex(
+                    IntegrityError,
+                    r"(symbolic link|reparse point).*model",
+                ):
+                    verify_release_root(
+                        root,
+                        expected_root_manifest_sha256=sha256(
+                            root / "integrity_manifest.sha256"
+                        ),
+                        spec=spec,
+                    )
+            finally:
+                if os.path.lexists(model):
+                    os.rmdir(model)
+
+    @unittest.skipUnless(os.name == "nt", "Windows reparse-file contract")
+    def test_root_rejects_windows_reparse_file_when_supported(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            parent = Path(temp_dir)
+            root, spec = make_valid_root(parent / "release")
+            linked_file = root / "MODEL_CARD.md"
+            outside_file = parent / "outside-model-card.md"
+            linked_file.replace(outside_file)
+            completed = subprocess.run(
+                ["cmd.exe", "/d", "/c", "mklink", str(linked_file), str(outside_file)],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            if completed.returncode != 0:
+                self.skipTest(f"cannot create NTFS file symlink: {completed.stderr}")
+            try:
+                with self.assertRaisesRegex(
+                    IntegrityError,
+                    r"(symbolic link|reparse point).*MODEL_CARD.md",
+                ):
+                    verify_release_root(
+                        root,
+                        expected_root_manifest_sha256=sha256(
+                            root / "integrity_manifest.sha256"
+                        ),
+                        spec=spec,
+                    )
+            finally:
+                if os.path.lexists(linked_file):
+                    linked_file.unlink()
 
     def test_regenerated_manifest_cannot_bless_changed_pinned_model_or_task(self):
         pinned_paths = ("model/best_model.pt", "model/hand_landmarker.task")
@@ -346,7 +629,13 @@ class ReleaseRootVerificationTests(unittest.TestCase):
                         IntegrityError,
                         rf"canonical.*{re.escape(relative)}",
                     ):
-                        verify_release_root(root, spec=spec)
+                        verify_release_root(
+                            root,
+                            expected_root_manifest_sha256=sha256(
+                                root / "integrity_manifest.sha256"
+                            ),
+                            spec=spec,
+                        )
 
     def test_regenerated_manifest_cannot_bless_changed_packaged_release_spec(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -361,7 +650,13 @@ class ReleaseRootVerificationTests(unittest.TestCase):
                 IntegrityError,
                 "canonical.*packaging/knee42_ivcam/release_spec.json",
             ):
-                verify_release_root(root, spec=spec)
+                verify_release_root(
+                    root,
+                    expected_root_manifest_sha256=sha256(
+                        root / "integrity_manifest.sha256"
+                    ),
+                    spec=spec,
+                )
 
     def test_default_verifier_uses_the_canonical_tracked_spec(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -371,7 +666,12 @@ class ReleaseRootVerificationTests(unittest.TestCase):
                 IntegrityError,
                 "canonical.*packaging/knee42_ivcam/release_spec.json",
             ):
-                verify_release_root(root)
+                verify_release_root(
+                    root,
+                    expected_root_manifest_sha256=sha256(
+                        root / "integrity_manifest.sha256"
+                    ),
+                )
 
     def test_packaged_default_spec_cannot_authorize_its_own_changed_pins(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -389,7 +689,12 @@ class ReleaseRootVerificationTests(unittest.TestCase):
                     IntegrityError,
                     "canonical release spec SHA-256",
                 ):
-                    verify_release_root(root)
+                    verify_release_root(
+                        root,
+                        expected_root_manifest_sha256=sha256(
+                            root / "integrity_manifest.sha256"
+                        ),
+                    )
 
     def test_version_manifest_rejects_wrong_contract_fields(self):
         wrong_values = {
@@ -413,13 +718,47 @@ class ReleaseRootVerificationTests(unittest.TestCase):
                     rewrite_root_manifest(root)
 
                     with self.assertRaisesRegex(IntegrityError, re.escape(field)):
-                        verify_release_root(root, spec=spec)
+                        verify_release_root(
+                            root,
+                            expected_root_manifest_sha256=sha256(
+                                root / "integrity_manifest.sha256"
+                            ),
+                            spec=spec,
+                        )
+
+    def test_version_manifest_rejects_non_integer_input_shape_elements(self):
+        wrong_shapes = ([True, 64, 438], [1, 64.0, 438])
+        with tempfile.TemporaryDirectory() as temp_dir:
+            parent = Path(temp_dir)
+            for index, wrong_shape in enumerate(wrong_shapes):
+                with self.subTest(input_shape=wrong_shape):
+                    root, spec = make_valid_root(parent / str(index))
+                    version_path = root / "VERSION_MANIFEST.json"
+                    payload = json.loads(version_path.read_text(encoding="utf-8"))
+                    payload["input_shape"] = wrong_shape
+                    version_path.write_text(json.dumps(payload), encoding="utf-8")
+                    rewrite_root_manifest(root)
+
+                    with self.assertRaisesRegex(IntegrityError, "input_shape"):
+                        verify_release_root(
+                            root,
+                            expected_root_manifest_sha256=sha256(
+                                root / "integrity_manifest.sha256"
+                            ),
+                            spec=spec,
+                        )
 
     def test_valid_root_returns_immutable_structured_record(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root, spec = make_valid_root(Path(temp_dir))
 
-            verified = verify_release_root(root, spec=spec)
+            verified = verify_release_root(
+                root,
+                expected_root_manifest_sha256=sha256(
+                    root / "integrity_manifest.sha256"
+                ),
+                spec=spec,
+            )
 
             self.assertIsInstance(verified, VerifiedRelease)
             self.assertEqual(verified.root, root.resolve())
