@@ -16,15 +16,15 @@ class FramePacketTests(unittest.TestCase):
 
 
 class LiveClockTests(unittest.TestCase):
-    def test_variable_cadence_uses_perf_counter_elapsed_time(self):
-        readings = iter((10.0, 10.04, 10.041, 10.19))
+    def test_variable_and_stalled_cadence_uses_perf_counter_elapsed_time(self):
+        readings = iter((10.0, 10.04, 10.04, 10.19))
         clock = LiveClock(perf_counter=readings.__next__)
 
         timestamps = [clock.next_timestamp() for _ in range(4)]
 
         self.assertEqual(timestamps[0], 0.0)
         self.assertAlmostEqual(timestamps[1], 0.04)
-        self.assertAlmostEqual(timestamps[2], 0.041)
+        self.assertAlmostEqual(timestamps[2], 0.04)
         self.assertAlmostEqual(timestamps[3], 0.19)
         self.assertEqual(clock.clock_mode, "live_perf_counter")
 
@@ -42,14 +42,6 @@ class LiveClockTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "regress|monotonic"):
             clock.next_timestamp()
-
-    def test_equal_perf_counter_reading_is_rejected(self):
-        clock = LiveClock(perf_counter=iter((10.0, 10.0)).__next__)
-        clock.next_timestamp()
-
-        with self.assertRaisesRegex(ValueError, "strict|advance"):
-            clock.next_timestamp()
-
 
 class VideoClockTests(unittest.TestCase):
     def test_vfr_source_timestamps_are_preserved(self):

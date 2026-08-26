@@ -197,6 +197,8 @@ class AutoKnee42Controller:
         if self.mode == "manual":
             self._last_timestamp = timestamp_sec
             return self._manual.add_feature(feature)
+        if self._last_timestamp is not None and timestamp_sec == self._last_timestamp:
+            return ControllerEvent(self.state)
         analysis = self._analysis_fn(self._previous_trigger, trigger, self.config)
         self._previous_trigger = trigger.copy()
         return self._add_analyzed_observation(
@@ -221,6 +223,7 @@ class AutoKnee42Controller:
         state_before_update = self.engine.state
         rest_candidate = self.engine._is_rest_candidate(analysis)
         segment = self.engine.update(trigger, analysis, timestamp_sec)
+        self._bound_engine_buffers()
         if rest_candidate and state_before_update in {"SIGNING_ACTIVE", "END_CONFIRM"}:
             self._last_rest_trigger = trigger.copy()
             self._last_rest_feature = feature
@@ -290,14 +293,23 @@ class AutoKnee42Controller:
         feature: Any,
     ) -> ControllerEvent:
         """Hold one detector result at each exact collected source timestamp."""
+        timestamp_count = len(timestamp_sec_values)
+        if timestamp_count > MAX_HELD_OBSERVATION_SAMPLES:
+            raise ValueError(
+                "held observation timestamp count must be at most the bound "
+                f"{MAX_HELD_OBSERVATION_SAMPLES}"
+            )
         timestamps = tuple(float(value) for value in timestamp_sec_values)
         if not timestamps:
             raise ValueError("held observation timestamps cannot be empty")
         if not all(np.isfinite(value) for value in timestamps):
             raise ValueError("held observation timestamps must be finite")
         previous = self._last_timestamp
+        advancing_timestamps: list[float] = []
         for timestamp_sec in timestamps:
             self._validate_timestamp(timestamp_sec, previous)
+            if previous is None or timestamp_sec > previous:
+                advancing_timestamps.append(timestamp_sec)
             previous = timestamp_sec
 
         trigger = np.asarray(trigger_values, dtype=np.float32)
@@ -312,11 +324,13 @@ class AutoKnee42Controller:
                     inference_event = event
             return inference_event or event
 
+        if not advancing_timestamps:
+            return ControllerEvent(self.state)
         analysis = self._analysis_fn(self._previous_trigger, trigger, self.config)
         self._previous_trigger = trigger.copy()
         event = ControllerEvent(self.state)
         inference_event = None
-        for timestamp_sec in timestamps:
+        for timestamp_sec in advancing_timestamps:
             event = self._add_analyzed_observation(
                 timestamp_sec,
                 trigger,
@@ -370,9 +384,7 @@ class AutoKnee42Controller:
             if later > earlier
         ]
         if not observed_intervals:
-            raise ValueError(
-                "cannot finalize video EOF without advancing collected timestamps"
-            )
+            return ControllerEvent(self.state)
         frame_interval_sec = float(np.median(observed_intervals))
         if frame_interval_sec < MIN_PRACTICAL_TIMESTAMP_INTERVAL_SEC:
             raise ValueError("collected EOF timestamps have an impractical cadence")
@@ -418,6 +430,18 @@ class AutoKnee42Controller:
             expired = self._timestamps.popleft()
             self._features.pop(expired, None)
 
+    def _bound_engine_buffers(self) -> None:
+        for buffer in (self.engine._pre_roll, self.engine._end_votes):
+            while len(buffer) > MAX_BUFFERED_OBSERVATIONS:
+                buffer.popleft()
+        for buffer in (
+            self.engine.segment_samples,
+            self.engine._reference_signatures,
+            self.engine._reference_wrist_signatures,
+        ):
+            if len(buffer) > MAX_BUFFERED_OBSERVATIONS:
+                del buffer[:-MAX_BUFFERED_OBSERVATIONS]
+
     @staticmethod
     def _validate_timestamp(timestamp_sec: float, previous: float | None) -> None:
         if not np.isfinite(timestamp_sec):
@@ -425,8 +449,10 @@ class AutoKnee42Controller:
         if previous is None:
             return
         interval_sec = timestamp_sec - previous
-        if interval_sec <= 0.0:
-            raise ValueError("Frame timestamps must be strictly monotonic increasing.")
+        if interval_sec < 0.0:
+            raise ValueError("Frame timestamps must be monotonic nondecreasing.")
+        if interval_sec == 0.0:
+            return
         if (
             interval_sec + _TIMESTAMP_INTERVAL_EPSILON_SEC
             < MIN_PRACTICAL_TIMESTAMP_INTERVAL_SEC

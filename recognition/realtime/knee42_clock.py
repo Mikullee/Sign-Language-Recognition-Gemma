@@ -39,9 +39,9 @@ class LiveClock:
         reading = float(self._perf_counter())
         if not math.isfinite(reading):
             raise ValueError(f"live perf_counter reading must be finite, got {reading!r}")
-        if self._previous_reading is not None and reading <= self._previous_reading:
+        if self._previous_reading is not None and reading < self._previous_reading:
             raise ValueError(
-                "live perf_counter readings must strictly advance monotonically; "
+                "live perf_counter readings must not regress; "
                 f"from {self._previous_reading!r} to {reading!r}"
             )
         if self._origin is None:

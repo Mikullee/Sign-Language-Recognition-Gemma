@@ -2,7 +2,7 @@
   "source_zip_name": "knee_detector_team_trial_20260814_194922.zip",
   "source_zip_sha256": "d31da3a2075321304cc595657417bf810eb52ee83ff5057a09aec9a2218f4f3c",
   "auto_trigger_source_sha256": "0092136a14a859c7a11aa0e5df9d0920a37471e8da09718828eb773d00d6fdc7",
-  "auto_trigger_controller_sha256": "23b0f0d458e7313140d5841dc603d103484f742ef36d0e4a387f00970d422056",
+  "auto_trigger_controller_sha256": "f92ecad0da68aad389a05a87a124aef9213dab7aa27db206bb992b82f156b152",
   "auto_trigger_config_sha256": "d21f64f4f45f343964a532c5525ff5a4ce5669c9dcbc288cc7b65ccdf62ef728",
   "temporal_model_sha256": "e2bec48438f8085dd4f8207c13376afe50384b9f0a2e081939278922cf81bad8",
   "knee_geometry_enabled": false,
