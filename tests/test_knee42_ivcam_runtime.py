@@ -16,7 +16,8 @@ import torch
 import recognition.realtime.knee42_ivcam as knee42_ivcam
 
 from recognition.inference.daily30_sentence_model_utils import BiGRUSentenceClassifier
-from recognition.realtime.knee42_capture import apply_video_transform
+from recognition.realtime.knee42_capture import OpenCVFrameSource
+from recognition.realtime.knee42_clock import LiveClock
 from recognition.realtime.knee42_ivcam import (
     InferenceResult,
     IntegrityError,
@@ -28,6 +29,10 @@ from recognition.realtime.knee42_ivcam import (
     overlay_lines,
     run_self_test,
     verify_auto_trigger_provenance,
+)
+from recognition.realtime.knee42_preprocessing import (
+    LANDMARK_DIM,
+    materialize_sequence,
 )
 from recognition.training.train_knee42_bigru import LABELS
 
@@ -293,47 +298,135 @@ class RuntimeTests(unittest.TestCase):
         self.assertNotIn("detectors.extract_observation(view", source)
         self.assertNotIn("detectors.extract_observation(display", source)
 
+    def test_detector_boundaries_require_explicit_pixels_mirrored_keyword(self):
+        bundle = SimpleNamespace(root=Path("bundle"))
+        for boundary in (
+            knee42_ivcam.MediapipeDetectors,
+            knee42_ivcam.create_mediapipe_detectors,
+        ):
+            with self.subTest(boundary=boundary.__name__):
+                with self.assertRaisesRegex(TypeError, "pixels_mirrored"):
+                    boundary(bundle)
+
+    def test_display_orientation_mirrors_copies_and_preserves_model_materialization(self):
+        frame = np.repeat(
+            np.arange(1, 7, dtype=np.uint8).reshape(2, 3, 1),
+            3,
+            axis=2,
+        )
+        pose = np.full((33, 3), np.nan, dtype=np.float32)
+        left_hand = np.full((21, 3), np.nan, dtype=np.float32)
+        right_hand = np.full((21, 3), np.nan, dtype=np.float32)
+        pose[11] = (0.20, 0.31, 0.11)
+        pose[12] = (0.65, 0.69, 0.12)
+        left_hand[0] = (0.15, 0.41, -0.35)
+        right_hand[0] = (0.80, 0.59, 0.45)
+        original_frame = frame.copy()
+        original_pose = pose.copy()
+        original_left = left_hand.copy()
+        original_right = right_hand.copy()
+        values = np.arange(2 * LANDMARK_DIM, dtype=np.float32).reshape(2, LANDMARK_DIM)
+        mask = np.ones_like(values, dtype=np.bool_)
+        materialized_before = materialize_sequence(
+            values,
+            mask,
+            np.zeros(LANDMARK_DIM, dtype=np.float32),
+            np.ones(LANDMARK_DIM, dtype=np.float32),
+        )
+        values_bytes = values.tobytes()
+        mask_bytes = mask.tobytes()
+
+        display_frame, display_pose, display_left, display_right = (
+            knee42_ivcam._display_orientation(
+                frame,
+                pose,
+                left_hand,
+                right_hand,
+                display_mirror=True,
+            )
+        )
+
+        np.testing.assert_array_equal(display_frame, np.flip(original_frame, axis=1))
+        self.assertAlmostEqual(float(display_pose[11, 0]), 0.80)
+        self.assertAlmostEqual(float(display_pose[12, 0]), 0.35)
+        self.assertAlmostEqual(float(display_left[0, 0]), 0.85)
+        self.assertAlmostEqual(float(display_right[0, 0]), 0.20)
+        self.assertAlmostEqual(float(display_left[0, 2]), -0.35)
+        self.assertAlmostEqual(float(display_right[0, 2]), 0.45)
+        self.assertTrue(np.isnan(display_pose[0]).all())
+        self.assertTrue(np.isnan(display_left[1]).all())
+        self.assertTrue(np.isnan(display_right[1]).all())
+        self.assertIsNot(display_frame, frame)
+        self.assertIsNot(display_pose, pose)
+        self.assertIsNot(display_left, left_hand)
+        self.assertIsNot(display_right, right_hand)
+        np.testing.assert_array_equal(frame, original_frame)
+        np.testing.assert_array_equal(pose, original_pose)
+        np.testing.assert_array_equal(left_hand, original_left)
+        np.testing.assert_array_equal(right_hand, original_right)
+        self.assertEqual(values.tobytes(), values_bytes)
+        self.assertEqual(mask.tobytes(), mask_bytes)
+        materialized_after = materialize_sequence(
+            values,
+            mask,
+            np.zeros(LANDMARK_DIM, dtype=np.float32),
+            np.ones(LANDMARK_DIM, dtype=np.float32),
+        )
+        np.testing.assert_array_equal(materialized_after, materialized_before)
+
+        display_frame, display_pose, display_left, display_right = (
+            knee42_ivcam._display_orientation(
+                frame,
+                None,
+                None,
+                None,
+                display_mirror=True,
+            )
+        )
+        np.testing.assert_array_equal(display_frame, np.flip(frame, axis=1))
+        self.assertIsNone(display_pose)
+        self.assertIsNone(display_left)
+        self.assertIsNone(display_right)
+
     def test_runtime_threads_input_orientation_and_keeps_display_mirror_out_of_features(self):
         raw_frame = np.repeat(
             np.arange(1, 7, dtype=np.uint8).reshape(2, 3, 1),
             3,
             axis=2,
         )
-        transformed_frame = apply_video_transform(
-            raw_frame,
-            90,
-            horizontal_mirror=True,
+        expected_input_frame = np.repeat(
+            np.array([[1, 4], [2, 5], [3, 6]], dtype=np.uint8)[:, :, None],
+            3,
+            axis=2,
+        )
+        expected_display_mirror = np.repeat(
+            np.array([[4, 1], [5, 2], [6, 3]], dtype=np.uint8)[:, :, None],
+            3,
+            axis=2,
         )
         detector_frames = []
         display_frames = []
         predicted_features = []
         source_calls = []
+        source_captures = []
         detector_policies = []
         results = []
 
-        class PacketSource:
-            status = "video:orientation.mp4"
-            fps = 30.0
-            clock_mode = "video_source_timestamp"
-            resolved_rotation = 90
-            rotation_degrees = 90.0
-            input_mirror = True
-
+        class PacketCapture:
             def __init__(self):
-                self.done = False
+                self.frames = [raw_frame.copy()]
+                self.released = False
 
-            def read_packet(self):
-                if self.done:
-                    return None
-                self.done = True
-                return SimpleNamespace(
-                    frame=transformed_frame.copy(),
-                    timestamp_sec=0.0,
-                    clock_mode=self.clock_mode,
-                )
+            def read(self):
+                return (True, self.frames.pop(0)) if self.frames else (False, None)
 
             def release(self):
-                return None
+                self.released = True
+
+            def get(self, _property):
+                return 30.0
+
+        packet_cv2 = SimpleNamespace(CAP_PROP_FPS=5)
 
         class Bundle:
             sequence_length = 1
@@ -378,7 +471,16 @@ class RuntimeTests(unittest.TestCase):
 
         def open_source(path, *, rotation, input_mirror, cv2_module):
             source_calls.append((path, rotation, input_mirror, cv2_module is not None))
-            return PacketSource()
+            capture = PacketCapture()
+            source_captures.append(capture)
+            return OpenCVFrameSource(
+                capture,
+                "video:orientation.mp4",
+                packet_cv2,
+                clock=LiveClock(perf_counter=iter((100.0,)).__next__),
+                rotation_degrees=rotation,
+                input_mirror=input_mirror,
+            )
 
         def create_detectors(_bundle, *, pixels_mirrored):
             detector_policies.append(pixels_mirrored)
@@ -428,12 +530,13 @@ class RuntimeTests(unittest.TestCase):
             ],
         )
         self.assertEqual(detector_policies, [True, True])
-        np.testing.assert_array_equal(detector_frames[0], transformed_frame)
-        np.testing.assert_array_equal(detector_frames[1], transformed_frame)
-        np.testing.assert_array_equal(display_frames[0], transformed_frame)
-        np.testing.assert_array_equal(display_frames[1], np.flip(transformed_frame, axis=1))
+        np.testing.assert_array_equal(detector_frames[0], expected_input_frame)
+        np.testing.assert_array_equal(detector_frames[1], expected_input_frame)
+        np.testing.assert_array_equal(display_frames[0], expected_input_frame)
+        np.testing.assert_array_equal(display_frames[1], expected_display_mirror)
         np.testing.assert_array_equal(predicted_features[0][0], predicted_features[1][0])
         np.testing.assert_array_equal(predicted_features[0][1], predicted_features[1][1])
+        self.assertTrue(all(capture.released for capture in source_captures))
         for result in results:
             self.assertEqual(result["resolved_rotation"], 90)
             self.assertTrue(result["input_mirror"])
@@ -892,7 +995,8 @@ class RuntimeTests(unittest.TestCase):
 
         hand_context = HandContext()
         detectors = knee42_ivcam.MediapipeDetectors(
-            SimpleNamespace(root=Path("bundle"))
+            SimpleNamespace(root=Path("bundle")),
+            pixels_mirrored=False,
         )
         with (
             mock.patch.object(
@@ -1413,6 +1517,12 @@ class RuntimeTests(unittest.TestCase):
 
     def test_self_test_uses_no_camera_and_runs_real_42_logit_forward(self):
         FakeDetectorContext.entered = 0
+        detector_policies = []
+
+        def detector_factory(_bundle, *, pixels_mirrored):
+            detector_policies.append(pixels_mirrored)
+            return FakeDetectorContext()
+
         with tempfile.TemporaryDirectory() as temp_dir:
             bundle = make_bundle(Path(temp_dir))
 
@@ -1423,7 +1533,7 @@ class RuntimeTests(unittest.TestCase):
                 result = run_self_test(
                     bundle,
                     device=torch.device("cpu"),
-                    detector_factory=lambda _bundle: FakeDetectorContext(),
+                    detector_factory=detector_factory,
                 )
 
             self.assertEqual(result["logit_shape"], [1, 42])
@@ -1431,6 +1541,7 @@ class RuntimeTests(unittest.TestCase):
             self.assertFalse(result["camera_opened"])
             self.assertTrue(result["integrity_verified"])
             self.assertEqual(FakeDetectorContext.entered, 1)
+            self.assertEqual(detector_policies, [False])
 
     def test_self_test_rejects_tampered_auto_trigger_before_detector_creation(self):
         with tempfile.TemporaryDirectory() as temp_dir:

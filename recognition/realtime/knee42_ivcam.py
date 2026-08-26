@@ -375,7 +375,7 @@ def auto_display_state(state: str, *, calibrated: bool) -> str:
 
 
 class MediapipeDetectors:
-    def __init__(self, bundle: Knee42Bundle, *, pixels_mirrored: bool = True):
+    def __init__(self, bundle: Knee42Bundle, *, pixels_mirrored: bool):
         if type(pixels_mirrored) is not bool:
             raise TypeError(f"pixels_mirrored must be bool, got {pixels_mirrored!r}")
         self.bundle = bundle
@@ -449,7 +449,7 @@ class MediapipeDetectors:
 def create_mediapipe_detectors(
     bundle: Knee42Bundle,
     *,
-    pixels_mirrored: bool = True,
+    pixels_mirrored: bool,
 ) -> MediapipeDetectors:
     return MediapipeDetectors(bundle, pixels_mirrored=pixels_mirrored)
 
@@ -458,11 +458,11 @@ def run_self_test(
     bundle_dir: Path,
     *,
     device: torch.device,
-    detector_factory: Callable[[Knee42Bundle], Any] = create_mediapipe_detectors,
+    detector_factory: Callable[..., Any] = create_mediapipe_detectors,
 ) -> dict[str, Any]:
     verify_auto_trigger_provenance(Path(bundle_dir).resolve().parent)
     bundle = load_bundle(bundle_dir, device=device)
-    with detector_factory(bundle):
+    with detector_factory(bundle, pixels_mirrored=False):
         mediapipe_created = True
     raw = np.zeros((5, LANDMARK_DIM), dtype=np.float32)
     mask = np.ones_like(raw, dtype=np.bool_)

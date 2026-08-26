@@ -22,6 +22,7 @@ class FakeCapture:
         self.pos_msec = list(pos_msec or [])
         self.last_pos_msec = float("nan")
         self.released = False
+        self.orientation_auto = 1.0
 
     def isOpened(self):
         return self.opened
@@ -39,13 +40,25 @@ class FakeCapture:
     def get(self, property_id):
         if property_id == FakeCv2.CAP_PROP_POS_MSEC:
             return self.last_pos_msec
+        if property_id == FakeCv2.CAP_PROP_ORIENTATION_META:
+            return 0.0
+        if property_id == FakeCv2.CAP_PROP_ORIENTATION_AUTO:
+            return self.orientation_auto
         return self.fps_value
+
+    def set(self, property_id, value):
+        if property_id == FakeCv2.CAP_PROP_ORIENTATION_AUTO:
+            self.orientation_auto = float(value)
+            return True
+        return False
 
 
 class FakeCv2:
     CAP_DSHOW = 700
     CAP_PROP_FPS = 5
     CAP_PROP_POS_MSEC = 0
+    CAP_PROP_ORIENTATION_META = 48
+    CAP_PROP_ORIENTATION_AUTO = 49
 
     def __init__(
         self,

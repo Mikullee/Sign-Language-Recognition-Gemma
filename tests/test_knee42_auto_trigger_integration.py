@@ -100,7 +100,11 @@ class DualObservationTests(unittest.TestCase):
         )
         pose_result = SimpleNamespace(pose_landmarks=[landmarks(33, 0.0)])
 
-        observation = observation_from_results(hand_result, pose_result)
+        observation = observation_from_results(
+            hand_result,
+            pose_result,
+            pixels_mirrored=True,
+        )
 
         self.assertEqual(observation.trigger_values.shape, (225,))
         self.assertEqual(observation.recognition_values.shape, (219,))
@@ -115,7 +119,11 @@ class DualObservationTests(unittest.TestCase):
     def test_missing_hands_are_zero_for_trigger_and_nan_masked_for_recognition(self):
         pose_result = SimpleNamespace(pose_landmarks=[landmarks(33, 0.0)])
 
-        observation = observation_from_results(None, pose_result)
+        observation = observation_from_results(
+            None,
+            pose_result,
+            pixels_mirrored=True,
+        )
 
         self.assertTrue(np.all(observation.trigger_values[99:] == 0.0))
         hand_start = 31 * 3

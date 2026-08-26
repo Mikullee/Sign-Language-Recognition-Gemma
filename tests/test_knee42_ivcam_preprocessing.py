@@ -10,6 +10,7 @@ import numpy as np
 from recognition.realtime.knee42_preprocessing import (
     LANDMARK_DIM,
     POSE_KEEP,
+    _result_landmark_groups,
     flatten_landmarks,
     landmarks_from_results,
     materialize_sequence,
@@ -72,6 +73,18 @@ class Knee42PreprocessingTests(unittest.TestCase):
         self.assertEqual(int(mask.sum()), len(POSE_KEEP) * 3)
         self.assertTrue(np.isnan(values[len(POSE_KEEP) * 3 :]).all())
         self.assertFalse(mask[len(POSE_KEEP) * 3 :].any())
+
+    def test_result_boundaries_require_explicit_pixels_mirrored_keyword(self):
+        for boundary in (
+            _result_landmark_groups,
+            observation_from_results,
+            landmarks_from_results,
+        ):
+            with self.subTest(boundary=boundary.__name__):
+                with self.assertRaisesRegex(TypeError, "pixels_mirrored"):
+                    boundary(None, None)
+                with self.assertRaisesRegex(TypeError, "pixels_mirrored"):
+                    boundary(None, None, pixels_mirrored=1)
 
     def test_mediapipe_results_are_mapped_by_handedness_not_detection_order(self):
         right = landmarks(21, 2_000.0)

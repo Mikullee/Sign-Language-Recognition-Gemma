@@ -67,6 +67,8 @@ def _result_landmark_groups(
     *,
     pixels_mirrored: bool,
 ) -> tuple[Sequence[Any] | None, Sequence[Any] | None, Sequence[Any] | None]:
+    if type(pixels_mirrored) is not bool:
+        raise TypeError(f"pixels_mirrored must be bool, got {pixels_mirrored!r}")
     pose_groups = getattr(pose_result, "pose_landmarks", []) if pose_result is not None else []
     pose_landmarks = pose_groups[0] if pose_groups else None
     hands: dict[str, Sequence[Any] | None] = {"left": None, "right": None}
@@ -94,14 +96,9 @@ def observation_from_results(
     hand_result: Any,
     pose_result: Any,
     *,
-    pixels_mirrored: bool = True,
+    pixels_mirrored: bool,
 ) -> FrameObservation:
-    """Create trigger/model views using an explicit pixel-handedness policy.
-
-    ``True`` preserves the legacy MediaPipe/selfie-label assumption for callers
-    that have not yet declared source orientation. Formal runtime code passes the
-    actual input mirror policy explicitly.
-    """
+    """Create trigger/model views using the required pixel-handedness policy."""
     pose, left, right = _result_landmark_groups(
         hand_result,
         pose_result,
@@ -129,7 +126,7 @@ def landmarks_from_results(
     hand_result: Any,
     pose_result: Any,
     *,
-    pixels_mirrored: bool = True,
+    pixels_mirrored: bool,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Map MediaPipe results to anatomical slots in the frozen feature contract."""
     observation = observation_from_results(
