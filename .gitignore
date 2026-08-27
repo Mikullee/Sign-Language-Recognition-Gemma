@@ -10,6 +10,10 @@
 *.ckpt
 *.onnx
 *.task
+!tests/fixtures/knee42_model_component/best_model.pt
+!tests/fixtures/knee42_model_component/standardizer_train_only.npz
+!tests/fixtures/knee42_model_component/hand_landmarker.task
+!tests/fixtures/knee42_model_component/pose_landmarker.task
 __pycache__/
 *.pyc
 *.pyo

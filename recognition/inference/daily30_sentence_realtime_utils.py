@@ -150,7 +150,22 @@ def save_prediction_logs(
         with csv_path.open("w", encoding="utf-8-sig", newline="") as handle:
             writer = csv.DictWriter(handle, fieldnames=fieldnames)
             writer.writeheader()
-            writer.writerows(prediction_rows)
+            writer.writerows(
+                {
+                    key: (
+                        json.dumps(
+                            value,
+                            ensure_ascii=False,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        )
+                        if isinstance(value, (dict, list, tuple))
+                        else value
+                    )
+                    for key, value in row.items()
+                }
+                for row in prediction_rows
+            )
     else:
         csv_path.write_text("", encoding="utf-8")
 

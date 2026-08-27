@@ -7,6 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
+from unittest import mock
 
 from recognition.realtime.auto_trigger import AutoFrameAnalysis, AutoTriggerConfig
 from recognition.realtime.knee42_controllers import AutoKnee42Controller
@@ -16,7 +17,7 @@ from recognition.realtime.knee42_preprocessing import observation_from_results
 ROOT = Path(__file__).resolve().parents[1]
 TEMPLATE = ROOT / "packaging" / "knee42_ivcam"
 ARCHIVED_TRIGGER_SHA256 = "0092136a14a859c7a11aa0e5df9d0920a37471e8da09718828eb773d00d6fdc7"
-ARCHIVED_CONTROLLER_SHA256 = "32adf8ddb026a79cb68b8a71b0e60d784d70605c201f772d32ef38d367bcb5b4"
+ARCHIVED_CONTROLLER_SHA256 = "f92ecad0da68aad389a05a87a124aef9213dab7aa27db206bb992b82f156b152"
 ARCHIVED_CONFIG_SHA256 = "d21f64f4f45f343964a532c5525ff5a4ce5669c9dcbc288cc7b65ccdf62ef728"
 ARCHIVED_ZIP_SHA256 = "d31da3a2075321304cc595657417bf810eb52ee83ff5057a09aec9a2218f4f3c"
 
@@ -58,14 +59,33 @@ def frame_analysis(_previous, current, _config) -> AutoFrameAnalysis:
 
 
 class AutoTriggerProvenanceTests(unittest.TestCase):
-    def test_archived_trigger_source_and_config_are_exactly_locked(self):
+    def test_archived_upstream_and_current_runtime_hashes_are_separate(self):
         source = ROOT / "recognition" / "realtime" / "auto_trigger.py"
         controller = ROOT / "recognition" / "realtime" / "knee42_controllers.py"
         config = TEMPLATE / "auto_trigger_knee_ivcam_local.json"
+        provenance = json.loads(
+            (TEMPLATE / "auto_trigger_provenance.json").read_text(encoding="utf-8")
+        )
 
-        self.assertEqual(sha256(source), ARCHIVED_TRIGGER_SHA256)
-        self.assertEqual(sha256(controller), ARCHIVED_CONTROLLER_SHA256)
-        self.assertEqual(sha256(config), ARCHIVED_CONFIG_SHA256)
+        self.assertEqual(
+            provenance["archived_upstream"]["auto_trigger_source_sha256"],
+            ARCHIVED_TRIGGER_SHA256,
+        )
+        self.assertEqual(
+            provenance["archived_upstream"]["auto_trigger_controller_sha256"],
+            ARCHIVED_CONTROLLER_SHA256,
+        )
+        self.assertEqual(
+            provenance["archived_upstream"]["auto_trigger_config_sha256"],
+            ARCHIVED_CONFIG_SHA256,
+        )
+        self.assertEqual(provenance["runtime_binding"]["auto_trigger_source_sha256"], sha256(source))
+        self.assertEqual(
+            provenance["runtime_binding"]["auto_trigger_controller_sha256"],
+            sha256(controller),
+        )
+        self.assertEqual(provenance["runtime_binding"]["auto_trigger_config_sha256"], sha256(config))
+        self.assertEqual(provenance["trusted_root_binding"], "release_manifest_required")
         payload = json.loads(config.read_text(encoding="utf-8"))
         self.assertFalse(payload["knee_geometry_enabled"])
         self.assertFalse(payload["temporal_classifier_enabled"])
@@ -76,13 +96,13 @@ class AutoTriggerProvenanceTests(unittest.TestCase):
             (TEMPLATE / "auto_trigger_provenance.json").read_text(encoding="utf-8")
         )
 
-        self.assertEqual(payload["source_zip_sha256"], ARCHIVED_ZIP_SHA256)
-        self.assertEqual(payload["auto_trigger_source_sha256"], ARCHIVED_TRIGGER_SHA256)
         self.assertEqual(
-            payload["auto_trigger_controller_sha256"],
-            ARCHIVED_CONTROLLER_SHA256,
+            payload["archived_upstream"]["source_zip_sha256"], ARCHIVED_ZIP_SHA256
         )
-        self.assertEqual(payload["auto_trigger_config_sha256"], ARCHIVED_CONFIG_SHA256)
+        self.assertEqual(
+            payload["archived_upstream"]["auto_trigger_source_sha256"],
+            ARCHIVED_TRIGGER_SHA256,
+        )
         self.assertFalse(payload["temporal_classifier_enabled"])
 
 
@@ -99,7 +119,11 @@ class DualObservationTests(unittest.TestCase):
         )
         pose_result = SimpleNamespace(pose_landmarks=[landmarks(33, 0.0)])
 
-        observation = observation_from_results(hand_result, pose_result)
+        observation = observation_from_results(
+            hand_result,
+            pose_result,
+            pixels_mirrored=True,
+        )
 
         self.assertEqual(observation.trigger_values.shape, (225,))
         self.assertEqual(observation.recognition_values.shape, (219,))
@@ -114,7 +138,11 @@ class DualObservationTests(unittest.TestCase):
     def test_missing_hands_are_zero_for_trigger_and_nan_masked_for_recognition(self):
         pose_result = SimpleNamespace(pose_landmarks=[landmarks(33, 0.0)])
 
-        observation = observation_from_results(None, pose_result)
+        observation = observation_from_results(
+            None,
+            pose_result,
+            pixels_mirrored=True,
+        )
 
         self.assertTrue(np.all(observation.trigger_values[99:] == 0.0))
         hand_start = 31 * 3
@@ -123,6 +151,36 @@ class DualObservationTests(unittest.TestCase):
 
 
 class AutoKnee42ControllerTests(unittest.TestCase):
+    def test_short_finalize_retains_boundary_decision_telemetry(self):
+        controller = AutoKnee42Controller(
+            AutoTriggerConfig(
+                start_hold_sec=0.1,
+                end_hold_sec=0.1,
+                pre_roll_sec=0.0,
+                min_segment_sec=5.0,
+                reference_rest_enabled=False,
+            ),
+            analysis_fn=frame_analysis,
+        )
+        event = None
+        for timestamp, code in ((0.0, 0), (0.1, 1), (0.2, 1), (0.3, 0), (0.4, 0)):
+            event = controller.add_observation(
+                timestamp,
+                np.full(225, code, dtype=np.float32),
+                (f"values-{timestamp}", f"mask-{timestamp}"),
+            )
+        self.assertEqual(event.message, "short_segment")
+        decision = getattr(event, "boundary_decision", None)
+        self.assertIsNotNone(decision, "short finalize dropped its boundary decision")
+        self.assertEqual(decision.state_before, "END_CONFIRM")
+        self.assertEqual(decision.finalize_reason, "visible_rest_finalize")
+        self.assertEqual(decision.decision_reason, "short_segment")
+        self.assertEqual(decision.calibration.status.value, "disabled")
+        self.assertEqual(
+            decision.threshold_snapshot["start_motion_threshold"],
+            controller.config.start_motion_threshold,
+        )
+
     def test_toggle_clears_auto_state_and_enables_manual_space_recording(self):
         controller = AutoKnee42Controller(
             AutoTriggerConfig(reference_rest_enabled=False),
@@ -198,6 +256,47 @@ class AutoKnee42ControllerTests(unittest.TestCase):
             events[0].segment.rest_detected_sec,
         )
 
+    def test_equal_timestamp_is_coalesced_without_advancing_trigger(self):
+        controller = AutoKnee42Controller(
+            AutoTriggerConfig(
+                start_hold_sec=0.10,
+                pre_roll_sec=0.10,
+                end_hold_sec=0.10,
+                end_rest_vote_ratio=0.75,
+                min_segment_sec=0.10,
+                cooldown_sec=0.20,
+                knee_geometry_enabled=False,
+                reference_rest_enabled=False,
+            ),
+            analysis_fn=frame_analysis,
+        )
+        event = None
+        for timestamp, code, name in (
+            (0.0, 0, "rest"),
+            (0.1, 1, "sign-a"),
+            (0.1, 1, "sign-b"),
+            (0.2, 1, "sign-c"),
+            (0.3, 0, "end-a"),
+            (0.4, 0, "end-b"),
+        ):
+            candidate = controller.add_observation(
+                timestamp,
+                np.full(225, code, dtype=np.float32),
+                (name, name),
+            )
+            if candidate.infer:
+                event = candidate
+
+        self.assertIsNotNone(event)
+        self.assertEqual(
+            event.features,
+            (
+                ("rest", "rest"),
+                ("sign-a", "sign-a"),
+                ("sign-c", "sign-c"),
+            ),
+        )
+
     def test_non_monotonic_timestamp_is_rejected(self):
         controller = AutoKnee42Controller(
             AutoTriggerConfig(reference_rest_enabled=False),
@@ -208,6 +307,81 @@ class AutoKnee42ControllerTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "monotonic"):
             controller.add_observation(0.9, trigger, ("two", "two"))
+
+    def test_equal_timestamp_is_accepted_but_positive_tiny_cadence_is_rejected(self):
+        controller = AutoKnee42Controller(
+            AutoTriggerConfig(reference_rest_enabled=False),
+            analysis_fn=frame_analysis,
+        )
+        trigger = np.zeros(225, dtype=np.float32)
+        controller.add_observation(1.0, trigger, ("first", "first"))
+        controller.add_observation(1.0, trigger, ("stalled", "stalled"))
+
+        with self.assertRaisesRegex(ValueError, "cadence"):
+            controller.add_observation(
+                1.0 + 1e-12,
+                trigger,
+                ("invalid", "invalid"),
+            )
+
+        self.assertEqual(controller.sample_timestamps, (1.0,))
+        self.assertEqual(len(controller.engine._pre_roll), 1)
+
+    def test_ten_thousand_equal_observations_are_accepted_and_bounded(self):
+        controller = AutoKnee42Controller(
+            AutoTriggerConfig(reference_rest_enabled=False),
+            analysis_fn=frame_analysis,
+        )
+        trigger = np.zeros(225, dtype=np.float32)
+
+        for _ in range(10_000):
+            controller.add_observation(
+                1.0,
+                trigger,
+                ("stalled", "stalled"),
+            )
+
+        self.assertEqual(controller.buffered_observations, 1)
+        self.assertEqual(len(controller._features), 1)
+        self.assertEqual(len(controller.engine._pre_roll), 1)
+        self.assertEqual(len(controller.engine.segment_samples), 0)
+        self.assertEqual(len(controller.engine._end_votes), 0)
+
+    def test_controller_buffer_has_a_hard_count_bound_beyond_time_horizon(self):
+        controller = AutoKnee42Controller(
+            AutoTriggerConfig(
+                max_segment_sec=1000.0,
+                reference_rest_enabled=False,
+            ),
+            analysis_fn=frame_analysis,
+        )
+        trigger = np.zeros(225, dtype=np.float32)
+
+        for index in range(5000):
+            controller.add_observation(
+                index * 0.01,
+                trigger,
+                (f"values-{index}", f"mask-{index}"),
+            )
+
+        self.assertLessEqual(controller.buffered_observations, 4096)
+        self.assertLessEqual(len(controller._features), 4096)
+
+    def test_direct_observation_rejects_nonfinite_timestamp(self):
+        trigger = np.zeros(225, dtype=np.float32)
+
+        for timestamp in (float("nan"), float("inf"), float("-inf")):
+            with self.subTest(timestamp=timestamp):
+                controller = AutoKnee42Controller(
+                    AutoTriggerConfig(reference_rest_enabled=False),
+                    analysis_fn=frame_analysis,
+                )
+                with self.assertRaisesRegex(ValueError, "finite"):
+                    controller.add_observation(
+                        timestamp,
+                        trigger,
+                        ("values", "mask"),
+                    )
 
     def test_video_eof_completes_an_existing_end_confirmation_only(self):
         controller = AutoKnee42Controller(
@@ -236,7 +410,7 @@ class AutoKnee42ControllerTests(unittest.TestCase):
             )
 
         self.assertEqual(controller.state, "END_CONFIRM")
-        event = controller.finalize_video_eof(frame_interval_sec=0.10)
+        event = controller.finalize_video_eof()
 
         self.assertTrue(event.infer)
         self.assertEqual(event.message, "visible_rest_finalize")
@@ -276,6 +450,81 @@ class AutoKnee42ControllerTests(unittest.TestCase):
         self.assertFalse(event.infer)
         self.assertEqual(controller.state, "SIGNING_ACTIVE")
 
+    def test_video_eof_rejects_implausibly_tiny_compatibility_interval(self):
+        controller = AutoKnee42Controller(
+            AutoTriggerConfig(reference_rest_enabled=False),
+            analysis_fn=frame_analysis,
+        )
+
+        with self.assertRaisesRegex(ValueError, "cadence|practical"):
+            controller.finalize_video_eof(frame_interval_sec=1e-12)
+
+    def test_video_eof_synthetic_completion_has_a_hard_sample_bound(self):
+        controller = AutoKnee42Controller(
+            AutoTriggerConfig(
+                end_hold_sec=1000.0,
+                reference_rest_enabled=False,
+            ),
+            analysis_fn=frame_analysis,
+        )
+        controller.engine.state = "END_CONFIRM"
+        controller._last_timestamp = 0.1
+        controller._last_rest_trigger = np.zeros(225, dtype=np.float32)
+        controller._last_rest_feature = ("rest", "rest")
+        controller._timestamps.extend((0.0, 0.1))
+
+        with mock.patch.object(
+            controller,
+            "add_observation",
+            return_value=SimpleNamespace(infer=False),
+        ) as add_observation:
+            controller.finalize_video_eof()
+
+        self.assertLessEqual(add_observation.call_count, 256)
+
+    def test_video_eof_with_only_equal_history_does_not_synthesize(self):
+        controller = AutoKnee42Controller(
+            AutoTriggerConfig(reference_rest_enabled=False),
+            analysis_fn=frame_analysis,
+        )
+        controller.engine.state = "END_CONFIRM"
+        controller._last_timestamp = 0.1
+        controller._last_rest_trigger = np.zeros(225, dtype=np.float32)
+        controller._last_rest_feature = ("rest", "rest")
+        controller._timestamps.extend((0.1, 0.1))
+
+        with mock.patch.object(controller, "add_observation") as add_observation:
+            event = controller.finalize_video_eof()
+
+        self.assertFalse(event.infer)
+
+    def test_video_eof_preserves_short_boundary_decision_instead_of_empty_followup(self):
+        controller = AutoKnee42Controller(
+            AutoTriggerConfig(
+                start_hold_sec=0.10,
+                pre_roll_sec=0.0,
+                end_hold_sec=0.30,
+                min_segment_sec=5.0,
+                reference_rest_enabled=False,
+            ),
+            analysis_fn=frame_analysis,
+        )
+        for timestamp, code in ((0.0, 0), (0.1, 1), (0.2, 1), (0.3, 0)):
+            controller.add_observation(
+                timestamp,
+                np.full(225, code, dtype=np.float32),
+                (f"values-{timestamp}", f"mask-{timestamp}"),
+            )
+
+        event = controller.finalize_video_eof()
+
+        self.assertFalse(event.infer)
+        self.assertEqual(event.message, "short_segment")
+        self.assertIsNotNone(event.boundary_decision)
+        self.assertEqual(event.boundary_decision.decision_reason, "short_segment")
+        self.assertEqual(event.boundary_decision.state_before, "END_CONFIRM")
+        self.assertEqual(event.state, event.boundary_decision.state_after)
+
     def test_held_trigger_samples_preserve_30hz_timing_with_frame_step_two(self):
         controller = AutoKnee42Controller(
             AutoTriggerConfig(
@@ -305,6 +554,103 @@ class AutoKnee42ControllerTests(unittest.TestCase):
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0].message, "visible_rest_finalize")
 
+    def test_compatibility_held_observation_rejects_unbounded_sample_count(self):
+        controller = AutoKnee42Controller(
+            AutoTriggerConfig(reference_rest_enabled=False),
+            analysis_fn=frame_analysis,
+        )
+
+        with self.assertRaisesRegex(ValueError, "bound|at most"):
+            controller.add_held_observation(
+                0.0,
+                np.zeros(225, dtype=np.float32),
+                ("values", "mask"),
+                frame_interval_sec=0.01,
+                sample_count=257,
+            )
+
+    def test_exact_held_observation_rejects_unbounded_timestamp_count(self):
+        controller = AutoKnee42Controller(
+            AutoTriggerConfig(reference_rest_enabled=False),
+            analysis_fn=frame_analysis,
+        )
+
+        with self.assertRaisesRegex(ValueError, "bound|at most"):
+            controller.add_held_observation_at_times(
+                [0.0] * 257,
+                np.zeros(225, dtype=np.float32),
+                ("values", "mask"),
+            )
+
+    def test_held_samples_use_exact_irregular_collected_timestamps(self):
+        controller = AutoKnee42Controller(
+            AutoTriggerConfig(
+                knee_geometry_enabled=False,
+                reference_rest_enabled=False,
+            ),
+            analysis_fn=frame_analysis,
+        )
+
+        controller.add_held_observation_at_times(
+            [0.033, 0.071],
+            np.ones(225, dtype=np.float32),
+            ("values", "mask"),
+        )
+
+        self.assertEqual(controller.sample_timestamps, (0.033, 0.071))
+
+    def test_held_samples_accept_equal_stalled_timestamps(self):
+        controller = AutoKnee42Controller(
+            AutoTriggerConfig(reference_rest_enabled=False),
+            analysis_fn=frame_analysis,
+        )
+
+        controller.add_held_observation_at_times(
+            [0.033, 0.033, 0.071],
+            np.ones(225, dtype=np.float32),
+            ("values", "mask"),
+        )
+
+        self.assertEqual(controller.sample_timestamps, (0.033, 0.071))
+
+    def test_held_samples_reject_empty_nonfinite_and_regressing_sequences(self):
+        trigger = np.ones(225, dtype=np.float32)
+        invalid_sequences = (
+            ([], "empty"),
+            ([0.033, float("nan")], "finite"),
+            ([0.071, 0.033], "monotonic"),
+            ([0.033, 0.033 + 1e-12], "cadence"),
+        )
+
+        for timestamps, message in invalid_sequences:
+            with self.subTest(timestamps=timestamps):
+                controller = AutoKnee42Controller(
+                    AutoTriggerConfig(reference_rest_enabled=False),
+                    analysis_fn=frame_analysis,
+                )
+                with self.assertRaisesRegex(ValueError, message):
+                    controller.add_held_observation_at_times(
+                        timestamps,
+                        trigger,
+                        ("values", "mask"),
+                    )
+                self.assertEqual(controller.sample_timestamps, ())
+
+    def test_held_samples_reject_regression_against_previous_observation(self):
+        controller = AutoKnee42Controller(
+            AutoTriggerConfig(reference_rest_enabled=False),
+            analysis_fn=frame_analysis,
+        )
+        trigger = np.ones(225, dtype=np.float32)
+        controller.add_observation(0.071, trigger, ("first", "first"))
+
+        with self.assertRaisesRegex(ValueError, "monotonic"):
+            controller.add_held_observation_at_times(
+                [0.033],
+                trigger,
+                ("second", "second"),
+            )
+
     def test_held_samples_reuse_one_real_motion_analysis(self):
         calls = []
 
@@ -324,12 +670,10 @@ class AutoKnee42ControllerTests(unittest.TestCase):
             analysis_fn=counted_analysis,
         )
 
-        controller.add_held_observation(
-            0.0,
+        controller.add_held_observation_at_times(
+            [0.033, 0.071],
             np.ones(225, dtype=np.float32),
             ("values", "mask"),
-            frame_interval_sec=1.0 / 30.0,
-            sample_count=2,
         )
 
         self.assertEqual(len(calls), 1)

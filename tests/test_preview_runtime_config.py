@@ -101,6 +101,48 @@ class PreviewRuntimeConfigTests(unittest.TestCase):
 
         self.assertEqual(args.source, "demo.mp4")
         self.assertEqual(args.max_frames, 120)
+        self.assertIsNone(args.min_conf_override)
+
+    def test_legacy_threshold_parser_uses_none_without_a_sentinel(self):
+        from recognition.realtime.realtime_infer_daily30_sentence import (
+            parse_args,
+            resolve_runtime_args,
+        )
+
+        parsed = parse_args([])
+
+        self.assertIsNone(parsed.min_conf_override)
+        resolved = resolve_runtime_args(parsed)
+        self.assertIsNone(resolved.min_conf_override)
+
+        for disabled_legacy_value in ("-0.1", "-1", "-999"):
+            with self.subTest(disabled_legacy_value=disabled_legacy_value):
+                resolved = resolve_runtime_args(
+                    parse_args(["--min-conf-override", disabled_legacy_value])
+                )
+                self.assertIsNone(resolved.min_conf_override)
+
+    def test_nonnegative_legacy_acceptance_threshold_override_is_unavailable(self):
+        from recognition.realtime.realtime_infer_daily30_sentence import (
+            parse_args,
+            resolve_runtime_args,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(
+                ValueError,
+                "acceptance threshold is unavailable.*calibration/risk-coverage evidence",
+            ):
+                resolve_runtime_args(
+                    parse_args(
+                        [
+                            "--app-config",
+                            str(Path(tmp) / "missing.json"),
+                            "--min-conf-override",
+                            "0.2",
+                        ]
+                    )
+                )
 
     def test_app_config_loads_defaults_and_cli_values_win(self):
         from recognition.realtime.realtime_infer_daily30_sentence import (

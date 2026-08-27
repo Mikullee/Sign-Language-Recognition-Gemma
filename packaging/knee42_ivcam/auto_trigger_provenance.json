@@ -1,10 +1,19 @@
 {
-  "source_zip_name": "knee_detector_team_trial_20260814_194922.zip",
-  "source_zip_sha256": "d31da3a2075321304cc595657417bf810eb52ee83ff5057a09aec9a2218f4f3c",
-  "auto_trigger_source_sha256": "0092136a14a859c7a11aa0e5df9d0920a37471e8da09718828eb773d00d6fdc7",
-  "auto_trigger_controller_sha256": "32adf8ddb026a79cb68b8a71b0e60d784d70605c201f772d32ef38d367bcb5b4",
-  "auto_trigger_config_sha256": "d21f64f4f45f343964a532c5525ff5a4ce5669c9dcbc288cc7b65ccdf62ef728",
-  "temporal_model_sha256": "e2bec48438f8085dd4f8207c13376afe50384b9f0a2e081939278922cf81bad8",
+  "schema_version": 2,
+  "archived_upstream": {
+    "source_zip_name": "knee_detector_team_trial_20260814_194922.zip",
+    "source_zip_sha256": "d31da3a2075321304cc595657417bf810eb52ee83ff5057a09aec9a2218f4f3c",
+    "auto_trigger_source_sha256": "0092136a14a859c7a11aa0e5df9d0920a37471e8da09718828eb773d00d6fdc7",
+    "auto_trigger_controller_sha256": "f92ecad0da68aad389a05a87a124aef9213dab7aa27db206bb992b82f156b152",
+    "auto_trigger_config_sha256": "d21f64f4f45f343964a532c5525ff5a4ce5669c9dcbc288cc7b65ccdf62ef728",
+    "temporal_model_sha256": "e2bec48438f8085dd4f8207c13376afe50384b9f0a2e081939278922cf81bad8"
+  },
+  "runtime_binding": {
+    "auto_trigger_source_sha256": "69321214f2797a7ea5b93c811e6ebbf214c18ce4a79f033f1340c8e9bb9e6e07",
+    "auto_trigger_controller_sha256": "5244e239236cc59924ff99b138dcaf569b2b7df38abe60dbb189d0af716cc130",
+    "auto_trigger_config_sha256": "34ac8a34e0ddf59642e3fa35bb3ab6ec092fd5c4c6dcbc9dde17dc578d7db5fa"
+  },
+  "trusted_root_binding": "release_manifest_required",
   "knee_geometry_enabled": false,
   "temporal_classifier_enabled": false,
   "archived_recognizer_imported": false,

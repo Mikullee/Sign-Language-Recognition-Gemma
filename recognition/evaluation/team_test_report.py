@@ -4,7 +4,7 @@ import csv
 import json
 import zipfile
 from collections import Counter
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields
 from datetime import datetime
 from pathlib import Path
 
@@ -13,7 +13,8 @@ from openpyxl.formatting.rule import ColorScaleRule
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.worksheet.datavalidation import DataValidation
 
-from recognition.evaluation.team_test_session import TeamTestSession
+from recognition.evaluation.team_test_session import TeamTestSession, TeamTrialRecord
+from recognition.realtime.probability_reporting import probability_policy_record
 
 
 ERROR_REASON_OPTIONS = [
@@ -25,6 +26,7 @@ ERROR_REASON_OPTIONS = [
     "環境問題",
     "其他",
 ]
+TEAM_TRIAL_FIELDS = [field.name for field in fields(TeamTrialRecord)]
 
 
 @dataclass(frozen=True)
@@ -72,23 +74,26 @@ def build_label_summary(session: TeamTestSession) -> list[dict[str, object]]:
 
 def _trial_row(record) -> dict[str, object]:
     row = asdict(record)
-    row["top3_candidates"] = " | ".join(
-        f"{item['label']}:{float(item['confidence']):.4f}"
-        for item in record.top3_candidates
+    row["probability_policy"] = json.dumps(
+        record.probability_policy,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    row["top3_candidates"] = json.dumps(
+        record.top3_candidates,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
     )
     return row
 
 
 def _write_csv(path: Path, rows: list[dict[str, object]]) -> None:
-    fieldnames = list(rows[0].keys()) if rows else [
-        "tester_id",
-        "global_trial_number",
-        "expected_label",
-        "predicted_label",
-        "top1_correct",
-    ]
     with path.open("w", encoding="utf-8-sig", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer = csv.DictWriter(handle, fieldnames=TEAM_TRIAL_FIELDS)
         writer.writeheader()
         writer.writerows(rows)
 
@@ -97,6 +102,12 @@ def _append_rows(sheet, headers: list[str], rows: list[list[object]]) -> None:
     sheet.append(headers)
     for row in rows:
         sheet.append(row)
+        row_number = sheet.max_row
+        for column_number, value in enumerate(row, start=1):
+            if type(value) is float:
+                cell = sheet.cell(row=row_number, column=column_number)
+                cell.value = repr(value)
+                cell.data_type = "n"
     fill = PatternFill("solid", fgColor="1F4E78")
     for cell in sheet[1]:
         cell.font = Font(color="FFFFFF", bold=True)
@@ -164,17 +175,13 @@ def _write_workbook(path: Path, session: TeamTestSession) -> None:
 
     trial_sheet = workbook.create_sheet("逐次測試結果")
     trial_rows = [_trial_row(record) for record in session.records]
-    trial_headers = list(trial_rows[0].keys()) if trial_rows else [
-        "tester_id",
-        "global_trial_number",
-        "expected_label",
-        "predicted_label",
-        "top1_correct",
-    ]
     _append_rows(
         trial_sheet,
-        trial_headers,
-        [[row.get(header, "") for header in trial_headers] for row in trial_rows],
+        TEAM_TRIAL_FIELDS,
+        [
+            [row.get(header, "") for header in TEAM_TRIAL_FIELDS]
+            for row in trial_rows
+        ],
     )
 
     notes_sheet = workbook.create_sheet("組員備註")
@@ -218,6 +225,7 @@ def _write_workbook(path: Path, session: TeamTestSession) -> None:
 
 
 def export_team_test_reports(session: TeamTestSession) -> TeamReportPaths:
+    session.validate_for_write()
     session.session_dir.mkdir(parents=True, exist_ok=True)
     suffix = session.tester_id
     paths = TeamReportPaths(
@@ -230,7 +238,7 @@ def export_team_test_reports(session: TeamTestSession) -> TeamReportPaths:
     paths.session_json.write_text(
         json.dumps(
             {
-                "schema_version": 1,
+                "schema_version": 2,
                 "generated_at": datetime.now().isoformat(timespec="seconds"),
                 "tester_id": session.tester_id,
                 "model_version": session.model_version,
@@ -240,9 +248,11 @@ def export_team_test_reports(session: TeamTestSession) -> TeamReportPaths:
                 "total_trials": session.total_trials,
                 "is_complete": session.is_complete,
                 "runtime_metadata": session.runtime_metadata,
+                "probability_policy": probability_policy_record(),
             },
             ensure_ascii=False,
             indent=2,
+            allow_nan=False,
         ),
         encoding="utf-8",
     )

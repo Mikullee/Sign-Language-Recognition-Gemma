@@ -7,7 +7,7 @@ from pathlib import Path
 
 
 class RealtimeEntrypointTests(unittest.TestCase):
-    def test_current_module_exposes_calibrated_offline_cli(self):
+    def test_current_module_exposes_offline_cli_with_disabled_legacy_threshold(self):
         repo_root = Path(__file__).resolve().parents[1]
 
         result = subprocess.run(
@@ -27,9 +27,13 @@ class RealtimeEntrypointTests(unittest.TestCase):
         )
 
         self.assertEqual(result.returncode, 0, result.stderr)
+        normalized_help = " ".join(result.stdout.split())
         self.assertIn("--auto-config", result.stdout)
         self.assertIn("--end-hold-sec", result.stdout)
         self.assertIn("--app-config", result.stdout)
+        self.assertIn("--min-conf-override", result.stdout)
+        self.assertIn("calibration/risk-coverage evidence", normalized_help)
+        self.assertNotIn("calibrated confidence", result.stdout.lower())
         self.assertNotIn("--remote-run-dir", result.stdout)
         self.assertNotIn("--start-streak-frames", result.stdout)
 

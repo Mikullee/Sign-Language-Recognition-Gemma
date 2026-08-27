@@ -1,5 +1,30 @@
 # Files bound by Knee42 provenance hashes must have stable checkout bytes.
 configs/knee42/*.json text eol=lf
 packaging/knee42_ivcam/auto_trigger_knee_ivcam_local.json text eol=lf
+packaging/knee42_ivcam/auto_trigger_provenance.json text eol=lf
+packaging/knee42_ivcam/release_spec.json text eol=lf
+packaging/knee42_ivcam/default_component/*.json text eol=lf
 recognition/realtime/auto_trigger.py text eol=lf
 recognition/realtime/knee42_controllers.py text eol=lf
+recognition/__init__.py text eol=lf
+recognition/inference/__init__.py text eol=lf
+recognition/inference/daily30_sentence_model_utils.py text eol=lf
+recognition/realtime/__init__.py text eol=lf
+recognition/realtime/knee42_capture.py text eol=lf
+recognition/realtime/knee42_clock.py text eol=lf
+recognition/realtime/knee42_display.py text eol=lf
+recognition/realtime/knee42_golden.py text eol=lf
+recognition/realtime/knee42_integrity.py text eol=lf
+recognition/realtime/knee42_ivcam.py text eol=lf
+recognition/realtime/knee42_orientation.py text eol=lf
+recognition/realtime/knee42_preprocessing.py text eol=lf
+recognition/realtime/knee42_session_recording.py text eol=lf
+recognition/realtime/probability_reporting.py text eol=lf
+tests/fixtures/knee42_model_component/*.json text eol=lf
+tests/fixtures/knee42_model_component/*.sha256 text eol=lf
+tests/fixtures/knee42_model_component.expected-manifest-sha256.txt text eol=lf
+tests/fixtures/knee42_golden_contract.json text eol=lf
+tests/fixtures/knee42_model_component/best_model.pt -text
+tests/fixtures/knee42_model_component/standardizer_train_only.npz -text
+tests/fixtures/knee42_model_component/hand_landmarker.task -text
+tests/fixtures/knee42_model_component/pose_landmarker.task -text

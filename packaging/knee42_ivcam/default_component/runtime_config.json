@@ -1,0 +1,17 @@
+{
+  "bundle_version": "knee42_ivcam_v1",
+  "model_display_version": "v11",
+  "sequence_length": 64,
+  "landmark_value_dim": 219,
+  "model_input_dim": 438,
+  "pose_landmarks_removed": [
+    25,
+    26
+  ],
+  "frame_step": 2,
+  "stream": "RGB/color",
+  "video_file_orientation": "container_rotation_metadata_applied_explicitly",
+  "camera_model_input_mirror": false,
+  "display_mirror_is_independent": true,
+  "source_selection_ledger_sha256": "9a1016ffa6915f9ef18ca835f32166d71712240e1654dfc92fcd080f67f8a272"
+}

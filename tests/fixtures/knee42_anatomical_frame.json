@@ -1,0 +1,95 @@
+{
+  "schema_version": 2,
+  "description": "Synthetic crossed-hand landmark cases for anatomical handedness tests; contains no people or recordings.",
+  "anatomical_markers": {
+    "hand_identity_axis": "z",
+    "left_hand_first_z": -0.35,
+    "right_hand_first_z": 0.45,
+    "pose_identity_axis": "y",
+    "pose_left_index": 11,
+    "pose_left_y": 0.31,
+    "pose_right_index": 12,
+    "pose_right_y": 0.69
+  },
+  "scenarios": {
+    "mirrored_pixels": {
+      "pixels_mirrored": true,
+      "cases": [
+        {
+          "case_id": "anatomical_left_lower_x",
+          "detections": [
+            {
+              "mediapipe_label": "Right",
+              "anatomical_hand": "right",
+              "first_x": 0.75,
+              "first_z": 0.45
+            },
+            {
+              "mediapipe_label": "Left",
+              "anatomical_hand": "left",
+              "first_x": 0.25,
+              "first_z": -0.35
+            }
+          ]
+        },
+        {
+          "case_id": "anatomical_left_higher_x",
+          "detections": [
+            {
+              "mediapipe_label": "Left",
+              "anatomical_hand": "left",
+              "first_x": 0.78,
+              "first_z": -0.35
+            },
+            {
+              "mediapipe_label": "Right",
+              "anatomical_hand": "right",
+              "first_x": 0.22,
+              "first_z": 0.45
+            }
+          ]
+        }
+      ]
+    },
+    "unmirrored_pixels": {
+      "pixels_mirrored": false,
+      "cases": [
+        {
+          "case_id": "anatomical_left_lower_x",
+          "detections": [
+            {
+              "mediapipe_label": "Right",
+              "anatomical_hand": "left",
+              "first_x": 0.25,
+              "first_z": -0.35
+            },
+            {
+              "mediapipe_label": "Left",
+              "anatomical_hand": "right",
+              "first_x": 0.75,
+              "first_z": 0.45
+            }
+          ]
+        },
+        {
+          "case_id": "anatomical_left_higher_x",
+          "detections": [
+            {
+              "mediapipe_label": "Left",
+              "anatomical_hand": "right",
+              "first_x": 0.22,
+              "first_z": 0.45
+            },
+            {
+              "mediapipe_label": "Right",
+              "anatomical_hand": "left",
+              "first_x": 0.78,
+              "first_z": -0.35
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "invariant": "Within each pixel policy anatomical left appears at both lower and higher screen x; z identifies the synthetic hand while only declared mirroring and MediaPipe labels determine model slots."
+}

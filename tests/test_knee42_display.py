@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import ctypes
+import dataclasses
+import inspect
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -132,6 +134,21 @@ class WindowGeometryTests(unittest.TestCase):
 
 
 class HighQualityRenderTests(unittest.TestCase):
+    def test_display_prediction_and_e2_panel_use_raw_probability_semantics(self):
+        field_names = {
+            field.name for field in dataclasses.fields(knee42_display.DisplayPrediction)
+        }
+        source = inspect.getsource(knee42_display.draw_e2_information_panel)
+
+        self.assertIn("raw_probability", field_names)
+        self.assertNotIn("confidence", field_names)
+        self.assertIn("RAW PROBABILITY", source)
+        self.assertNotIn("confidence", source.lower())
+
+        prediction = knee42_display.DisplayPrediction("K42_01", "你好", 0.25)
+        with self.assertWarns(DeprecationWarning):
+            self.assertEqual(prediction.confidence, prediction.raw_probability)
+
     def test_state_lamp_palette_changes_with_runtime_state(self):
         mapper = getattr(knee42_display, "state_lamp_bgr", None)
 
@@ -204,7 +221,7 @@ class HighQualityRenderTests(unittest.TestCase):
     def test_panel_lines_wrap_by_rendered_pixel_width_without_losing_text(self):
         draw = ImageDraw.Draw(Image.new("RGB", (200, 100)))
         font = ImageFont.load_default()
-        source = "Top-1: K42_03 confidence 14.6%"
+        source = "Top-1: K42_03 raw probability 14.6%"
 
         rows = wrap_panel_lines(draw, [source], font, max_width=45)
 
@@ -345,7 +362,7 @@ class HighQualityRenderTests(unittest.TestCase):
         rendered = draw_information_panel(
             canvas,
             layout,
-            ["Top-1: K42_03", "confidence 14.6%", "FPS 21.0"],
+            ["Top-1: K42_03", "raw probability 14.6%", "FPS 21.0"],
             cv2_module=cv2,
             font_loader=lambda _size: ImageFont.load_default(),
         )

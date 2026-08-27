@@ -3,7 +3,8 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass
-from typing import Any, Callable
+from types import MappingProxyType
+from typing import Any, Callable, Mapping, Sequence
 
 import numpy as np
 
@@ -11,8 +12,17 @@ from recognition.realtime.auto_trigger import (
     AutoFrameAnalysis,
     AutoTriggerConfig,
     AutoTriggerEngine,
+    CalibrationTelemetry,
     analyze_frame_vector,
 )
+from recognition.realtime.knee42_clock import MAX_PRACTICAL_FPS
+
+
+MIN_PRACTICAL_TIMESTAMP_INTERVAL_SEC = 1.0 / MAX_PRACTICAL_FPS
+MAX_BUFFERED_OBSERVATIONS = 4096
+MAX_HELD_OBSERVATION_SAMPLES = 256
+MAX_EOF_SYNTHETIC_SAMPLES = 256
+_TIMESTAMP_INTERVAL_EPSILON_SEC = 1e-12
 
 
 @dataclass(frozen=True)
@@ -26,12 +36,50 @@ class SegmentEvidence:
 
 
 @dataclass(frozen=True)
+class BoundaryDecisionTelemetry:
+    state_before: str
+    state_after: str
+    clip_start_sec: float
+    clip_end_sec: float
+    finalize_sec: float
+    finalize_reason: str
+    decision_reason: str
+    rest_detected_sec: float | None
+    boundary_policy: str
+    threshold_snapshot: Mapping[str, float | bool]
+    calibration: CalibrationTelemetry
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "threshold_snapshot",
+            MappingProxyType(dict(self.threshold_snapshot)),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "state_before": self.state_before,
+            "state_after": self.state_after,
+            "clip_start_sec": self.clip_start_sec,
+            "clip_end_sec": self.clip_end_sec,
+            "finalize_sec": self.finalize_sec,
+            "finalize_reason": self.finalize_reason,
+            "decision_reason": self.decision_reason,
+            "rest_detected_sec": self.rest_detected_sec,
+            "boundary_policy": self.boundary_policy,
+            "threshold_snapshot": dict(self.threshold_snapshot),
+            "calibration": self.calibration.to_dict(),
+        }
+
+
+@dataclass(frozen=True)
 class ControllerEvent:
     state: str
     infer: bool = False
     features: tuple[Any, ...] = ()
     message: str = ""
     segment: SegmentEvidence | None = None
+    boundary_decision: BoundaryDecisionTelemetry | None = None
 
 
 class ManualController:
@@ -165,11 +213,16 @@ class AutoKnee42Controller:
         return len(self._timestamps)
 
     @property
+    def sample_timestamps(self) -> tuple[float, ...]:
+        return tuple(self._timestamps)
+
+    @property
     def calibrated(self) -> bool:
-        return bool(
-            not self.config.reference_rest_enabled
-            or self.engine._rest_reference_signature is not None
-        )
+        return self.calibration_telemetry.calibrated
+
+    @property
+    def calibration_telemetry(self) -> CalibrationTelemetry:
+        return self.engine.calibration_telemetry
 
     def add_observation(
         self,
@@ -178,14 +231,15 @@ class AutoKnee42Controller:
         feature: Any,
     ) -> ControllerEvent:
         timestamp_sec = float(timestamp_sec)
-        if self._last_timestamp is not None and timestamp_sec < self._last_timestamp:
-            raise ValueError("Frame timestamps must be monotonic.")
+        self._validate_timestamp(timestamp_sec, self._last_timestamp)
         trigger = np.asarray(trigger_values, dtype=np.float32)
         if trigger.shape != (225,):
             raise ValueError(f"expected 225 trigger values, got {trigger.shape}")
         if self.mode == "manual":
             self._last_timestamp = timestamp_sec
             return self._manual.add_feature(feature)
+        if self._last_timestamp is not None and timestamp_sec == self._last_timestamp:
+            return ControllerEvent(self.state)
         analysis = self._analysis_fn(self._previous_trigger, trigger, self.config)
         self._previous_trigger = trigger.copy()
         return self._add_analyzed_observation(
@@ -202,8 +256,7 @@ class AutoKnee42Controller:
         feature: Any,
         analysis: AutoFrameAnalysis,
     ) -> ControllerEvent:
-        if self._last_timestamp is not None and timestamp_sec < self._last_timestamp:
-            raise ValueError("Frame timestamps must be monotonic.")
+        self._validate_timestamp(timestamp_sec, self._last_timestamp)
         self._last_timestamp = timestamp_sec
         self._timestamps.append(timestamp_sec)
         self._features[timestamp_sec] = feature
@@ -211,13 +264,31 @@ class AutoKnee42Controller:
         state_before_update = self.engine.state
         rest_candidate = self.engine._is_rest_candidate(analysis)
         segment = self.engine.update(trigger, analysis, timestamp_sec)
+        self._bound_engine_buffers()
         if rest_candidate and state_before_update in {"SIGNING_ACTIVE", "END_CONFIRM"}:
             self._last_rest_trigger = trigger.copy()
             self._last_rest_feature = feature
         if segment is None:
             return ControllerEvent(self.state)
+        evidence = SegmentEvidence(
+            clip_start_sec=segment.clip_start_sec,
+            clip_end_sec=segment.clip_end_sec,
+            finalize_sec=segment.finalize_sec,
+            reason=segment.reason,
+            rest_detected_sec=segment.rest_detected_sec,
+            boundary_policy=segment.boundary_policy,
+        )
         if segment.duration_sec < self.config.min_segment_sec:
-            return ControllerEvent(self.state, message="short_segment")
+            return ControllerEvent(
+                self.state,
+                message="short_segment",
+                segment=evidence,
+                boundary_decision=self._boundary_decision(
+                    state_before_update,
+                    evidence,
+                    "short_segment",
+                ),
+            )
         missing = [
             sample.timestamp_sec
             for sample in segment.samples
@@ -226,19 +297,38 @@ class AutoKnee42Controller:
         if missing:
             raise RuntimeError(f"recognition feature missing for trigger timestamps: {missing}")
         features = tuple(self._features[sample.timestamp_sec] for sample in segment.samples)
+        decision_reason = "accepted_for_inference" if features else "dropped_empty_segment"
         return ControllerEvent(
             self.state,
             infer=bool(features),
             features=features,
-            message=segment.reason,
-            segment=SegmentEvidence(
-                clip_start_sec=segment.clip_start_sec,
-                clip_end_sec=segment.clip_end_sec,
-                finalize_sec=segment.finalize_sec,
-                reason=segment.reason,
-                rest_detected_sec=segment.rest_detected_sec,
-                boundary_policy=segment.boundary_policy,
+            message=segment.reason if features else decision_reason,
+            segment=evidence,
+            boundary_decision=self._boundary_decision(
+                state_before_update,
+                evidence,
+                decision_reason,
             ),
+        )
+
+    def _boundary_decision(
+        self,
+        state_before: str,
+        evidence: SegmentEvidence,
+        decision_reason: str,
+    ) -> BoundaryDecisionTelemetry:
+        return BoundaryDecisionTelemetry(
+            state_before=state_before,
+            state_after=self.engine.state,
+            clip_start_sec=evidence.clip_start_sec,
+            clip_end_sec=evidence.clip_end_sec,
+            finalize_sec=evidence.finalize_sec,
+            finalize_reason=evidence.reason,
+            decision_reason=decision_reason,
+            rest_detected_sec=evidence.rest_detected_sec,
+            boundary_policy=evidence.boundary_policy,
+            threshold_snapshot=self.config.to_dict(),
+            calibration=self.calibration_telemetry,
         )
 
     def add_held_observation(
@@ -250,39 +340,83 @@ class AutoKnee42Controller:
         frame_interval_sec: float,
         sample_count: int,
     ) -> ControllerEvent:
-        """Hold one detector result across skipped source frames for trigger timing."""
+        """Compatibility wrapper for callers that still provide a nominal interval."""
         frame_interval_sec = float(frame_interval_sec)
         sample_count = int(sample_count)
-        if frame_interval_sec <= 0 or sample_count <= 0:
-            raise ValueError("frame_interval_sec and sample_count must be positive")
+        if (
+            not np.isfinite(frame_interval_sec)
+            or frame_interval_sec < MIN_PRACTICAL_TIMESTAMP_INTERVAL_SEC
+        ):
+            raise ValueError("frame_interval_sec must have a finite practical cadence")
+        if sample_count <= 0 or sample_count > MAX_HELD_OBSERVATION_SAMPLES:
+            raise ValueError(
+                "sample_count must be positive and at most the held observation bound "
+                f"{MAX_HELD_OBSERVATION_SAMPLES}"
+            )
         timestamp_sec = float(timestamp_sec)
-        if self._last_timestamp is not None and timestamp_sec < self._last_timestamp:
-            raise ValueError("Frame timestamps must be monotonic.")
+        return self.add_held_observation_at_times(
+            [
+                timestamp_sec + sample_index * frame_interval_sec
+                for sample_index in range(sample_count)
+            ],
+            trigger_values,
+            feature,
+        )
+
+    def add_held_observation_at_times(
+        self,
+        timestamp_sec_values: Sequence[float],
+        trigger_values: np.ndarray,
+        feature: Any,
+    ) -> ControllerEvent:
+        """Hold one detector result at each exact collected source timestamp."""
+        timestamp_count = len(timestamp_sec_values)
+        if timestamp_count > MAX_HELD_OBSERVATION_SAMPLES:
+            raise ValueError(
+                "held observation timestamp count must be at most the bound "
+                f"{MAX_HELD_OBSERVATION_SAMPLES}"
+            )
+        timestamps = tuple(float(value) for value in timestamp_sec_values)
+        if not timestamps:
+            raise ValueError("held observation timestamps cannot be empty")
+        if not all(np.isfinite(value) for value in timestamps):
+            raise ValueError("held observation timestamps must be finite")
+        previous = self._last_timestamp
+        advancing_timestamps: list[float] = []
+        for timestamp_sec in timestamps:
+            self._validate_timestamp(timestamp_sec, previous)
+            if previous is None or timestamp_sec > previous:
+                advancing_timestamps.append(timestamp_sec)
+            previous = timestamp_sec
+
         trigger = np.asarray(trigger_values, dtype=np.float32)
         if trigger.shape != (225,):
             raise ValueError(f"expected 225 trigger values, got {trigger.shape}")
         if self.mode == "manual":
             event = ControllerEvent(self.state)
-            for sample_index in range(sample_count):
-                event = self.add_observation(
-                    timestamp_sec + sample_index * frame_interval_sec,
-                    trigger,
-                    feature,
-                )
-            return event
+            inference_event: ControllerEvent | None = None
+            for timestamp_sec in timestamps:
+                event = self.add_observation(timestamp_sec, trigger, feature)
+                if event.infer and inference_event is None:
+                    inference_event = event
+            return inference_event or event
+
+        if not advancing_timestamps:
+            return ControllerEvent(self.state)
         analysis = self._analysis_fn(self._previous_trigger, trigger, self.config)
         self._previous_trigger = trigger.copy()
         event = ControllerEvent(self.state)
-        for sample_index in range(sample_count):
+        inference_event = None
+        for timestamp_sec in advancing_timestamps:
             event = self._add_analyzed_observation(
-                timestamp_sec + sample_index * frame_interval_sec,
+                timestamp_sec,
                 trigger,
                 feature,
                 analysis,
             )
-            if event.infer:
-                return event
-        return event
+            if event.infer and inference_event is None:
+                inference_event = event
+        return inference_event or event
 
     def toggle_mode(self) -> ControllerEvent:
         target = "manual" if self.mode == "auto" else "auto"
@@ -295,11 +429,21 @@ class AutoKnee42Controller:
             return ControllerEvent(self.state, message="space is available in manual mode")
         return self._manual.on_space()
 
-    def finalize_video_eof(self, *, frame_interval_sec: float) -> ControllerEvent:
+    def finalize_video_eof(
+        self,
+        *,
+        frame_interval_sec: float | None = None,
+    ) -> ControllerEvent:
         """Complete an already-started rest confirmation at recorded-video EOF."""
-        frame_interval_sec = float(frame_interval_sec)
-        if frame_interval_sec <= 0:
-            raise ValueError("frame_interval_sec must be positive")
+        if frame_interval_sec is not None:
+            frame_interval_sec = float(frame_interval_sec)
+            if (
+                not np.isfinite(frame_interval_sec)
+                or frame_interval_sec < MIN_PRACTICAL_TIMESTAMP_INTERVAL_SEC
+            ):
+                raise ValueError(
+                    "frame_interval_sec must have a finite practical cadence"
+                )
         if (
             self.mode != "auto"
             or self.state != "END_CONFIRM"
@@ -307,19 +451,39 @@ class AutoKnee42Controller:
             or self._last_rest_trigger is None
         ):
             return ControllerEvent(self.state)
+        observed_timestamps = tuple(self._timestamps)
+        observed_intervals = [
+            later - earlier
+            for earlier, later in zip(
+                observed_timestamps[:-1],
+                observed_timestamps[1:],
+            )
+            if later > earlier
+        ]
+        if not observed_intervals:
+            return ControllerEvent(self.state)
+        frame_interval_sec = float(np.median(observed_intervals))
+        if frame_interval_sec < MIN_PRACTICAL_TIMESTAMP_INTERVAL_SEC:
+            raise ValueError("collected EOF timestamps have an impractical cadence")
         # Allow one transition frame plus endpoint/granularity slack before the
         # end-hold window contains a full interval of repeated rest evidence.
-        repeats = int(np.ceil(self.config.end_hold_sec / frame_interval_sec)) + 4
+        repeats = min(
+            MAX_EOF_SYNTHETIC_SAMPLES,
+            int(np.ceil(self.config.end_hold_sec / frame_interval_sec)) + 4,
+        )
         event = ControllerEvent(self.state)
+        first_boundary_event: ControllerEvent | None = None
         for _ in range(repeats):
             event = self.add_observation(
                 self._last_timestamp + frame_interval_sec,
                 self._last_rest_trigger.copy(),
                 self._last_rest_feature,
             )
+            if getattr(event, "boundary_decision", None) is not None and first_boundary_event is None:
+                first_boundary_event = event
             if event.infer:
                 return event
-        return event
+        return first_boundary_event or event
 
     def mark_result(self) -> ControllerEvent:
         if self.mode == "manual":
@@ -342,3 +506,37 @@ class AutoKnee42Controller:
         while self._timestamps and self._timestamps[0] < cutoff:
             expired = self._timestamps.popleft()
             self._features.pop(expired, None)
+        while len(self._timestamps) > MAX_BUFFERED_OBSERVATIONS:
+            expired = self._timestamps.popleft()
+            self._features.pop(expired, None)
+
+    def _bound_engine_buffers(self) -> None:
+        for buffer in (self.engine._pre_roll, self.engine._end_votes):
+            while len(buffer) > MAX_BUFFERED_OBSERVATIONS:
+                buffer.popleft()
+        for buffer in (
+            self.engine.segment_samples,
+            self.engine._reference_signatures,
+            self.engine._reference_wrist_signatures,
+        ):
+            if len(buffer) > MAX_BUFFERED_OBSERVATIONS:
+                del buffer[:-MAX_BUFFERED_OBSERVATIONS]
+
+    @staticmethod
+    def _validate_timestamp(timestamp_sec: float, previous: float | None) -> None:
+        if not np.isfinite(timestamp_sec):
+            raise ValueError("Frame timestamps must be finite.")
+        if previous is None:
+            return
+        interval_sec = timestamp_sec - previous
+        if interval_sec < 0.0:
+            raise ValueError("Frame timestamps must be monotonic nondecreasing.")
+        if interval_sec == 0.0:
+            return
+        if (
+            interval_sec + _TIMESTAMP_INTERVAL_EPSILON_SEC
+            < MIN_PRACTICAL_TIMESTAMP_INTERVAL_SEC
+        ):
+            raise ValueError(
+                "Frame timestamp cadence exceeds the practical 240 FPS limit."
+            )

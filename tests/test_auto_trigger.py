@@ -3,10 +3,11 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
-from dataclasses import replace
+from dataclasses import asdict, replace
 from pathlib import Path
 
 import numpy as np
+import recognition.realtime.auto_trigger as auto_trigger_module
 
 from recognition.realtime.auto_trigger import (
     SEGMENT_STATE_ACTIVE,
@@ -538,6 +539,67 @@ class AutoTriggerConfigTests(unittest.TestCase):
         self.assertEqual(config.end_rest_vote_ratio, 0.90)
         self.assertFalse(config.hidden_rest_enabled)
         self.assertEqual(config.start_motion_threshold, AutoTriggerConfig().start_motion_threshold)
+
+    def test_formal_loader_requires_exact_schema_and_start_not_above_blank(self):
+        loader = getattr(auto_trigger_module, "load_formal_auto_trigger_config", None)
+        self.assertTrue(callable(loader), "formal auto-trigger loader is missing")
+        valid = AutoTriggerConfig(
+            start_motion_threshold=0.015,
+            blank_motion_threshold=0.022,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "auto_trigger_knee_ivcam_local.json"
+            payload = asdict(valid)
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            self.assertEqual(loader(root), valid)
+            for mutation, expected in (
+                ({key: value for key, value in payload.items() if key != "start_hold_sec"}, "start_hold_sec"),
+                ({**payload, "unexpected": 1}, "unexpected"),
+                ({**payload, "start_motion_threshold": 0.03, "blank_motion_threshold": 0.02}, "start_motion_threshold"),
+            ):
+                with self.subTest(expected=expected):
+                    path.write_text(json.dumps(mutation), encoding="utf-8")
+                    with self.assertRaisesRegex((TypeError, ValueError), expected):
+                        loader(root)
+
+    def test_numeric_config_rejects_bool_nan_and_infinity(self):
+        for field_name, value in (
+            ("start_hold_sec", True),
+            ("blank_motion_threshold", float("nan")),
+            ("max_segment_sec", float("inf")),
+            ("pose_visibility_threshold", -float("inf")),
+        ):
+            with self.subTest(field=field_name, value=value):
+                with self.assertRaisesRegex((TypeError, ValueError), field_name):
+                    AutoTriggerConfig(**{field_name: value})
+
+
+class CalibrationTelemetryTests(unittest.TestCase):
+    @staticmethod
+    def _eligible(*, motion: float = 0.0, hands: int = 2) -> AutoFrameAnalysis:
+        return replace(
+            analysis(motion=motion, hands_detected=hands),
+            rest_signature=(0.0,) * 8,
+            wrist_rest_signature=(0.0,) * 4,
+        )
+
+    def test_reference_seed_requires_continuous_eligible_samples(self):
+        engine = AutoTriggerEngine(
+            AutoTriggerConfig(reference_rest_enabled=True, reference_seed_sec=0.5)
+        )
+        engine.update(frame(0.0), self._eligible(), 0.0)
+        engine.update(frame(0.3), self._eligible(), 0.3)
+        engine.update(frame(0.4), self._eligible(hands=1), 0.4)
+        engine.update(frame(0.5), self._eligible(), 0.5)
+        engine.update(frame(0.8), self._eligible(), 0.8)
+
+        telemetry = getattr(engine, "calibration_telemetry", None)
+        self.assertIsNotNone(telemetry, "structured calibration telemetry is missing")
+        self.assertFalse(telemetry.calibrated)
+        self.assertEqual(telemetry.status.value, "collecting_reference")
+        self.assertEqual(telemetry.sample_count, 2)
+        self.assertAlmostEqual(telemetry.elapsed_sec, 0.3)
 
 
 if __name__ == "__main__":

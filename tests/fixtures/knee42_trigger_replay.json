@@ -1,0 +1,118 @@
+{
+  "schema_version": 1,
+  "fixture_id": "knee42_trigger_replay_v1",
+  "frame_interval_sec": 0.05,
+  "config": {
+    "start_motion_threshold": 0.015,
+    "blank_motion_threshold": 0.022,
+    "start_hold_sec": 0.1,
+    "end_hold_sec": 0.3,
+    "end_rest_vote_ratio": 0.9,
+    "end_safety_tail_sec": 0.15,
+    "pre_roll_sec": 0.6,
+    "max_segment_sec": 12.0,
+    "min_segment_sec": 0.8,
+    "cooldown_sec": 0.67,
+    "torso_motion_weight": 0.2,
+    "knee_geometry_enabled": false,
+    "hidden_rest_enabled": false,
+    "knee_lateral_thigh_margin_ratio": 0.75,
+    "knee_min_thigh_progress_ratio": -1.1,
+    "knee_max_thigh_progress_ratio": 1.4,
+    "reference_rest_enabled": true,
+    "reference_seed_sec": 0.5,
+    "reference_seed_motion_threshold": 0.04,
+    "reference_rest_distance_threshold": 0.3,
+    "reference_departure_distance_threshold": 0.1,
+    "temporal_classifier_enabled": false,
+    "temporal_start_probability_threshold": 0.55,
+    "temporal_rest_probability_threshold": 0.55,
+    "pose_visibility_threshold": 0.35
+  },
+  "gates": {
+    "segment_recall_min": 1.0,
+    "premature_cut_count_max": 0,
+    "merge_count_max": 0,
+    "unexpected_timeout_count_max": 0,
+    "mean_absolute_boundary_error_sec_max": 0.12
+  },
+  "scenarios": [
+    {
+      "name": "nominal_single",
+      "duration_sec": 2.7,
+      "keyframes": [
+        {"at_sec": 0.0, "recipe": "rest"},
+        {"at_sec": 1.0, "recipe": "moving_sign_a"},
+        {"at_sec": 2.0, "recipe": "rest"}
+      ],
+      "annotations": [
+        {
+          "start_sec": 0.45,
+          "end_sec": 2.0,
+          "allowed_finalize_reasons": ["reference_rest_finalize"],
+          "allow_timeout": false
+        }
+      ]
+    },
+    {
+      "name": "mid_sign_pause",
+      "duration_sec": 3.0,
+      "keyframes": [
+        {"at_sec": 0.0, "recipe": "rest"},
+        {"at_sec": 1.0, "recipe": "moving_sign_a"},
+        {"at_sec": 1.5, "recipe": "active_pause"},
+        {"at_sec": 1.8, "recipe": "moving_sign_b"},
+        {"at_sec": 2.3, "recipe": "rest"}
+      ],
+      "annotations": [
+        {
+          "start_sec": 0.45,
+          "end_sec": 2.3,
+          "allowed_finalize_reasons": ["reference_rest_finalize"],
+          "allow_timeout": false
+        }
+      ]
+    },
+    {
+      "name": "back_to_back",
+      "duration_sec": 5.0,
+      "keyframes": [
+        {"at_sec": 0.0, "recipe": "rest"},
+        {"at_sec": 1.0, "recipe": "moving_sign_a"},
+        {"at_sec": 2.0, "recipe": "rest"},
+        {"at_sec": 3.2, "recipe": "moving_sign_b"},
+        {"at_sec": 4.2, "recipe": "rest"}
+      ],
+      "annotations": [
+        {
+          "start_sec": 0.45,
+          "end_sec": 2.0,
+          "allowed_finalize_reasons": ["reference_rest_finalize"],
+          "allow_timeout": false
+        },
+        {
+          "start_sec": 3.1,
+          "end_sec": 4.2,
+          "allowed_finalize_reasons": ["reference_rest_finalize"],
+          "allow_timeout": false
+        }
+      ]
+    },
+    {
+      "name": "expected_max_duration",
+      "duration_sec": 13.2,
+      "keyframes": [
+        {"at_sec": 0.0, "recipe": "rest"},
+        {"at_sec": 1.0, "recipe": "moving_sign_a"}
+      ],
+      "annotations": [
+        {
+          "start_sec": 0.45,
+          "end_sec": 12.4,
+          "allowed_finalize_reasons": ["timeout_finalize"],
+          "allow_timeout": true
+        }
+      ]
+    }
+  ]
+}
