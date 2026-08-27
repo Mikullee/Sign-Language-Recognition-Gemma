@@ -213,19 +213,19 @@ class SegmentSessionRecorder:
         }
         row = {
             "segment_index": index,
-            "clip_start_sec": f"{evidence.clip_start_sec:.6f}",
-            "clip_end_sec": f"{evidence.clip_end_sec:.6f}",
-            "finalize_sec": f"{evidence.finalize_sec:.6f}",
+            "clip_start_sec": float(evidence.clip_start_sec),
+            "clip_end_sec": float(evidence.clip_end_sec),
+            "finalize_sec": float(evidence.finalize_sec),
             "reason": evidence.reason,
             "rest_detected_sec": (
                 ""
                 if evidence.rest_detected_sec is None
-                else f"{evidence.rest_detected_sec:.6f}"
+                else float(evidence.rest_detected_sec)
             ),
             "boundary_policy": evidence.boundary_policy,
             "top1_label": top3[0]["label_id"],
             "top1_text": top3[0]["display_text"],
-            "top1_raw_probability": f"{top3[0]['raw_probability']:.9f}",
+            "top1_raw_probability": top3[0]["raw_probability"],
             "top3_json": json.dumps(top3, ensure_ascii=False, separators=(",", ":")),
             "exact_clip": exact_rel.as_posix(),
             "context_clip": context_rel.as_posix(),

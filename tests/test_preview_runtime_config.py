@@ -103,6 +103,25 @@ class PreviewRuntimeConfigTests(unittest.TestCase):
         self.assertEqual(args.max_frames, 120)
         self.assertIsNone(args.min_conf_override)
 
+    def test_legacy_threshold_parser_uses_none_without_a_sentinel(self):
+        from recognition.realtime.realtime_infer_daily30_sentence import (
+            parse_args,
+            resolve_runtime_args,
+        )
+
+        parsed = parse_args([])
+
+        self.assertIsNone(parsed.min_conf_override)
+        resolved = resolve_runtime_args(parsed)
+        self.assertIsNone(resolved.min_conf_override)
+
+        for disabled_legacy_value in ("-0.1", "-1", "-999"):
+            with self.subTest(disabled_legacy_value=disabled_legacy_value):
+                resolved = resolve_runtime_args(
+                    parse_args(["--min-conf-override", disabled_legacy_value])
+                )
+                self.assertIsNone(resolved.min_conf_override)
+
     def test_nonnegative_legacy_acceptance_threshold_override_is_unavailable(self):
         from recognition.realtime.realtime_infer_daily30_sentence import (
             parse_args,

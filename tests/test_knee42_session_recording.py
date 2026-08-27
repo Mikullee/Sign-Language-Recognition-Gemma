@@ -139,6 +139,7 @@ class SegmentSessionRecorderTests(unittest.TestCase):
     def test_stop_materializes_exact_and_context_clips_with_metadata(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
+            raw_probability = 0.12345678901234568
             recorder = SegmentSessionRecorder(
                 root,
                 fps=10.0,
@@ -149,9 +150,9 @@ class SegmentSessionRecorderTests(unittest.TestCase):
             for index in range(12):
                 recorder.add_frame(np.full((24, 32, 3), index * 10, dtype=np.uint8))
             result = SimpleNamespace(
-                top1=SimpleNamespace(label_id="K42_09", display_text="請再說一次", raw_probability=0.7),
+                top1=SimpleNamespace(label_id="K42_09", display_text="請再說一次", raw_probability=raw_probability),
                 top3=(
-                    SimpleNamespace(label_id="K42_09", display_text="請再說一次", raw_probability=0.7),
+                    SimpleNamespace(label_id="K42_09", display_text="請再說一次", raw_probability=raw_probability),
                     SimpleNamespace(label_id="K42_10", display_text="沒有", raw_probability=0.2),
                     SimpleNamespace(label_id="K42_11", display_text="有", raw_probability=0.1),
                 ),
@@ -175,12 +176,16 @@ class SegmentSessionRecorderTests(unittest.TestCase):
             with (summary.session_dir / "segments.csv").open(encoding="utf-8") as handle:
                 rows = list(csv.DictReader(handle))
             self.assertEqual(len(rows), 1)
-            self.assertEqual(rows[0]["rest_detected_sec"], "10.600000")
+            self.assertEqual(float(rows[0]["rest_detected_sec"]), 10.6)
             self.assertEqual(rows[0]["boundary_policy"], "low_motion_anchor_v1")
             self.assertEqual(rows[0]["top1_label"], "K42_09")
             self.assertEqual(rows[0]["top1_text"], "請再說一次")
             self.assertIn("top1_raw_probability", rows[0])
-            self.assertEqual(rows[0]["top1_raw_probability"], "0.700000000")
+            self.assertEqual(float(rows[0]["top1_raw_probability"]), raw_probability)
+            self.assertEqual(
+                json.loads(rows[0]["top3_json"])[0]["raw_probability"],
+                raw_probability,
+            )
             self.assertNotIn("top1_confidence", rows[0])
             exact = summary.session_dir / rows[0]["exact_clip"]
             context = summary.session_dir / rows[0]["context_clip"]
@@ -191,7 +196,7 @@ class SegmentSessionRecorderTests(unittest.TestCase):
             self.assertEqual(metadata["rest_detected_sec"], 10.6)
             self.assertEqual(metadata["boundary_policy"], "low_motion_anchor_v1")
             self.assertEqual([item["label_id"] for item in metadata["top3"]], ["K42_09", "K42_10", "K42_11"])
-            self.assertEqual(metadata["top1"]["raw_probability"], 0.7)
+            self.assertEqual(metadata["top1"]["raw_probability"], raw_probability)
             self.assertNotIn("confidence", metadata["top1"])
             self.assertEqual(
                 metadata["probability_policy"],

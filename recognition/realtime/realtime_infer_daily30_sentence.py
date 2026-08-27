@@ -150,6 +150,26 @@ def localize_top3_probabilities(
     ]
 
 
+def build_probability_log_fields(
+    raw_probability: float,
+    top3_candidates: list[tuple[str, float]],
+) -> dict[str, object]:
+    """Build machine-readable probability fields without presentation rounding."""
+    return {
+        "raw_probability": validate_raw_probability(raw_probability),
+        "probability_kind": PROBABILITY_POLICY.kind,
+        "acceptance_policy": PROBABILITY_POLICY.acceptance_policy,
+        "calibration_artifact": PROBABILITY_POLICY.calibration_artifact,
+        "top3_candidates": [
+            {
+                "label": label,
+                "raw_probability": validate_raw_probability(probability),
+            }
+            for label, probability in top3_candidates
+        ],
+    }
+
+
 @dataclass(frozen=True)
 class SegmentPrediction:
     predicted_label_id: str
@@ -357,7 +377,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--min-conf-override",
         type=float,
-        default=-1.0,
+        default=None,
         help=(
             "Deprecated compatibility option. Acceptance threshold is unavailable "
             "without calibration/risk-coverage evidence."
@@ -431,13 +451,14 @@ def resolve_runtime_args(args: argparse.Namespace) -> argparse.Namespace:
         raise ValueError("backend must be 'auto' or 'dshow'.")
     if args.trigger_mode not in {"auto", "manual"}:
         raise ValueError("trigger_mode must be 'auto' or 'manual'.")
-    if not np.isfinite(args.min_conf_override):
-        raise ValueError("--min-conf-override must be finite")
-    if args.min_conf_override >= 0.0:
-        raise ValueError(
-            "acceptance threshold is unavailable without "
-            "calibration/risk-coverage evidence"
-        )
+    if args.min_conf_override is not None:
+        if not np.isfinite(args.min_conf_override):
+            raise ValueError("--min-conf-override must be finite")
+        if args.min_conf_override >= 0.0:
+            raise ValueError(
+                "acceptance threshold is unavailable without "
+                "calibration/risk-coverage evidence"
+            )
     args.min_conf_override = None
     if args.team_test:
         args.trigger_mode = "auto"
@@ -688,7 +709,6 @@ def main() -> None:
                 "temporal_model_loaded": temporal_model is not None,
                 "source": str(args.source),
                 "backend": str(args.backend),
-                "probability_policy": probability_policy_record(),
             },
             resume=bool(args.resume),
         )
@@ -859,14 +879,10 @@ def main() -> None:
                         "manual_active": manual_active,
                         "predicted_label": display_label,
                         "display_label": display_label,
-                        "raw_probability": round(float(display_raw_probability), 4),
-                        "probability_kind": PROBABILITY_POLICY.kind,
-                        "acceptance_policy": PROBABILITY_POLICY.acceptance_policy,
-                        "calibration_artifact": PROBABILITY_POLICY.calibration_artifact,
-                        "top3_candidates": [
-                            {"label": label, "raw_probability": round(score, 4)}
-                            for label, score in top3_candidates
-                        ],
+                        **build_probability_log_fields(
+                            display_raw_probability,
+                            top3_candidates,
+                        ),
                         "segment_state": auto_engine.state if args.trigger_mode == "auto" else ("SIGNING_ACTIVE" if manual_active else "IDLE_BLANK"),
                         "segment_status": localize_segment_state(
                             auto_engine.state if args.trigger_mode == "auto" else (SEGMENT_STATE_ACTIVE if manual_active else SEGMENT_STATE_IDLE),
@@ -874,22 +890,22 @@ def main() -> None:
                         ),
                         "segment_frame_count": len(auto_engine.segment_samples) if args.trigger_mode == "auto" else len(manual_frame_vectors),
                         "segment_finalize_reason": last_finalize_reason,
-                        "clip_start_sec": "" if last_clip_start_sec is None else round(last_clip_start_sec, 4),
-                        "clip_end_sec": "" if last_clip_end_sec is None else round(last_clip_end_sec, 4),
-                        "finalize_sec": "" if last_finalize_sec is None else round(last_finalize_sec, 4),
+                        "clip_start_sec": "" if last_clip_start_sec is None else float(last_clip_start_sec),
+                        "clip_end_sec": "" if last_clip_end_sec is None else float(last_clip_end_sec),
+                        "finalize_sec": "" if last_finalize_sec is None else float(last_finalize_sec),
                         "is_blank": latest_analysis.is_blank,
                         "visible_rest_blank": latest_analysis.visible_rest_blank,
                         "hidden_rest_blank": latest_analysis.hidden_rest_blank,
-                        "torso_motion_score": round(float(latest_analysis.torso_motion_score), 6),
-                        "hand_motion_score": round(float(latest_analysis.hand_motion_score), 6),
-                        "effective_motion_score": round(float(latest_analysis.effective_motion_score), 6),
+                        "torso_motion_score": float(latest_analysis.torso_motion_score),
+                        "hand_motion_score": float(latest_analysis.hand_motion_score),
+                        "effective_motion_score": float(latest_analysis.effective_motion_score),
                         "hands_on_knees": latest_analysis.hands_on_knees,
                         "wrists_detected": latest_analysis.wrists_detected,
                         "torso_valid": latest_analysis.torso_valid,
                         "explicit_hands_detected": latest_analysis.explicit_hands_detected,
                         "wrist_source_left": latest_analysis.wrist_source_left,
                         "wrist_source_right": latest_analysis.wrist_source_right,
-                        "temporal_active_probability": "" if latest_analysis.temporal_active_probability is None else round(float(latest_analysis.temporal_active_probability), 6),
+                        "temporal_active_probability": "" if latest_analysis.temporal_active_probability is None else float(latest_analysis.temporal_active_probability),
                         "emitted_count": len(emitted_labels),
                     }
                 )
