@@ -1,0 +1,16 @@
+{
+  "ledger_version": "knee42_selection_v1",
+  "selection_metric": "dev_macro_top1",
+  "run_id": "20260818_134407",
+  "source_commit": "f10980bae4549fddcbb3fabebb617e555557172e",
+  "seed": 44,
+  "best_epoch": 29,
+  "source_selection_ledger_sha256": "9a1016ffa6915f9ef18ca835f32166d71712240e1654dfc92fcd080f67f8a272",
+  "artifacts": {
+    "best_model.pt": "8e35adedae1a03ad5644872769821d2966bb7613b5a1e070996929c7e5f2e492",
+    "feature_config.json": "c9670b77a6ab44d766559497e6dbf61a8da9ebfeca45e4b77c0640e596d0a5dc",
+    "standardizer_train_only.npz": "c252b4fdc9fa83179a75bb4726bd0062ebbd796a3beae35f3d47483d2456c391",
+    "label_map_knee42.json": "18c8121f8cdfafaf957ba07c7b3181d51055ffdd71493ba27b91c2c7260339b9",
+    "display_text_map.json": "a2d2e008cf6232b29ee04596e1e1bb418ccf0b0587f41e42471cf22e3b2073a3"
+  }
+}

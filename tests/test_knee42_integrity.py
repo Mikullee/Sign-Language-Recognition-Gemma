@@ -27,10 +27,27 @@ from recognition.realtime.knee42_integrity import (
 
 REPO = Path(__file__).resolve().parents[1]
 SPEC_PATH = REPO / "packaging" / "knee42_ivcam" / "release_spec.json"
+RUNTIME_IMPORT_CLOSURE = {
+    "recognition/__init__.py",
+    "recognition/inference/__init__.py",
+    "recognition/inference/daily30_sentence_model_utils.py",
+    "recognition/realtime/__init__.py",
+    "recognition/realtime/knee42_ivcam.py",
+    "recognition/realtime/knee42_golden.py",
+    "recognition/realtime/knee42_capture.py",
+    "recognition/realtime/knee42_clock.py",
+    "recognition/realtime/knee42_display.py",
+    "recognition/realtime/knee42_integrity.py",
+    "recognition/realtime/knee42_orientation.py",
+    "recognition/realtime/knee42_preprocessing.py",
+    "recognition/realtime/knee42_session_recording.py",
+    "recognition/realtime/probability_reporting.py",
+    "recognition/realtime/auto_trigger.py",
+    "recognition/realtime/knee42_controllers.py",
+}
 VERSION_FIELDS = {
     "release_version": "v1.0.1-v13.1",
     "app_version": "v13.1",
-    "model_version": "v11",
     "label_count": 42,
     "input_shape": [1, 64, 438],
     "source_commit": "a" * 40,
@@ -70,6 +87,8 @@ def make_valid_root(root: Path) -> tuple[Path, ReleaseSpec]:
         if relative not in {
             "VERSION_MANIFEST.json",
             "packaging/knee42_ivcam/release_spec.json",
+            "model/component_manifest.json",
+            "model/integrity_manifest.sha256",
         }:
             path.write_bytes(f"fixture:{relative}\n".encode("utf-8"))
 
@@ -85,7 +104,38 @@ def make_valid_root(root: Path) -> tuple[Path, ReleaseSpec]:
     )
     spec = load_release_spec(packaged_spec)
 
+    payload_names = sorted(
+        set(spec.required_model_layout)
+        - {spec.component_manifest_name, "integrity_manifest.sha256"}
+    )
+    payload_hashes = {
+        name: sha256(root / "model" / name) for name in payload_names
+    }
+    (root / "model" / "integrity_manifest.sha256").write_text(
+        "".join(f"{digest}  {name}\n" for name, digest in payload_hashes.items()),
+        encoding="ascii",
+    )
+    component = {
+        "schema_version": 1,
+        "component_id": "knee42-v11-integrity-fixture",
+        "model_version": "v11",
+        "label_count": 42,
+        "input_shape": [1, 64, 438],
+        "runtime_config_sha256": payload_hashes["runtime_config.json"],
+        "selection_ledger_sha256": payload_hashes["selection_ledger.json"],
+        "payload_sha256": payload_hashes,
+    }
+    component_path = root / "model" / spec.component_manifest_name
+    component_path.write_text(json.dumps(component, sort_keys=True), encoding="utf-8")
+
     version = dict(VERSION_FIELDS)
+    version.update(
+        {
+            "component_id": component["component_id"],
+            "model_version": component["model_version"],
+            "model_component_manifest_sha256": sha256(component_path),
+        }
+    )
     version["dependency_lock_sha256"] = sha256(
         root / "requirements-windows-runtime.lock.txt"
     )
@@ -98,6 +148,21 @@ def make_valid_root(root: Path) -> tuple[Path, ReleaseSpec]:
 
 
 class ReleaseSpecTests(unittest.TestCase):
+    def test_release_spec_and_verifier_pin_exact_runtime_import_closure(self):
+        spec = load_release_spec(SPEC_PATH)
+        declared_sources = {
+            relative
+            for relative in spec.required_release_root
+            if relative.startswith("recognition/")
+        }
+
+        self.assertEqual(declared_sources, RUNTIME_IMPORT_CLOSURE)
+        self.assertTrue(
+            RUNTIME_IMPORT_CLOSURE.issubset(
+                knee42_integrity.VERIFIER_REQUIRED_RELEASE_PATHS
+            )
+        )
+
     def test_release_spec_pins_fixed_versions_artifacts_assets_and_licenses(self):
         spec = load_release_spec(SPEC_PATH)
 
@@ -109,7 +174,8 @@ class ReleaseSpecTests(unittest.TestCase):
         self.assertIsInstance(spec, ReleaseSpec)
         self.assertEqual(spec.release_version, "v1.0.1-v13.1")
         self.assertEqual(spec.app_version, "v13.1")
-        self.assertEqual(spec.model_version, "v11")
+        self.assertEqual(spec.default_model_version, "v11")
+        self.assertEqual(spec.component_manifest_name, "component_manifest.json")
         self.assertEqual(spec.label_count, 42)
         self.assertEqual(spec.input_shape, (1, 64, 438))
         self.assertEqual(
@@ -186,8 +252,22 @@ class ReleaseSpecTests(unittest.TestCase):
                 "auto_trigger_knee_ivcam_local.json",
                 "auto_trigger_provenance.json",
                 "golden_contract.json",
+                "recognition/__init__.py",
+                "recognition/inference/__init__.py",
+                "recognition/inference/daily30_sentence_model_utils.py",
+                "recognition/realtime/__init__.py",
                 "recognition/realtime/auto_trigger.py",
+                "recognition/realtime/knee42_capture.py",
+                "recognition/realtime/knee42_clock.py",
                 "recognition/realtime/knee42_controllers.py",
+                "recognition/realtime/knee42_display.py",
+                "recognition/realtime/knee42_golden.py",
+                "recognition/realtime/knee42_integrity.py",
+                "recognition/realtime/knee42_ivcam.py",
+                "recognition/realtime/knee42_orientation.py",
+                "recognition/realtime/knee42_preprocessing.py",
+                "recognition/realtime/knee42_session_recording.py",
+                "recognition/realtime/probability_reporting.py",
                 "packaging/knee42_ivcam/release_spec.json",
             ),
         )
@@ -203,6 +283,7 @@ class ReleaseSpecTests(unittest.TestCase):
                 "selection_ledger.json",
                 "hand_landmarker.task",
                 "pose_landmarker.task",
+                "component_manifest.json",
                 "integrity_manifest.sha256",
             },
         )
@@ -246,7 +327,8 @@ class ReleaseSpecTests(unittest.TestCase):
             source_sha256=loaded.source_sha256,
             release_version=loaded.release_version,
             app_version=loaded.app_version,
-            model_version=loaded.model_version,
+            default_model_version=loaded.default_model_version,
+            component_manifest_name=loaded.component_manifest_name,
             label_count=loaded.label_count,
             input_shape=input_shape,  # type: ignore[arg-type]
             artifact_names=artifact_names,
@@ -284,7 +366,9 @@ class ReleaseSpecTests(unittest.TestCase):
             root=Path("release"),
             release_version="v1.0.1-v13.1",
             app_version="v13.1",
+            component_id="knee42-v11-fixture",
             model_version="v11",
+            model_component_manifest_sha256="e" * 64,
             label_count=42,
             input_shape=verified_shape,  # type: ignore[arg-type]
             source_commit="b" * 40,
@@ -692,10 +776,13 @@ if sentinel.exists():
                     linked_file.unlink()
 
     def test_regenerated_manifest_cannot_bless_changed_pinned_model_or_task(self):
-        pinned_paths = ("model/best_model.pt", "model/hand_landmarker.task")
+        pinned_paths = {
+            "model/best_model.pt": "component payload",
+            "model/hand_landmarker.task": "canonical",
+        }
         with tempfile.TemporaryDirectory() as temp_dir:
             parent = Path(temp_dir)
-            for index, relative in enumerate(pinned_paths):
+            for index, (relative, expected) in enumerate(pinned_paths.items()):
                 with self.subTest(path=relative):
                     root, spec = make_valid_root(parent / str(index))
                     path = release_path(root, relative)
@@ -704,7 +791,7 @@ if sentinel.exists():
 
                     with self.assertRaisesRegex(
                         IntegrityError,
-                        rf"canonical.*{re.escape(relative)}",
+                        rf"{expected}.*{re.escape(relative)}",
                     ):
                         verify_release_root(
                             root,
@@ -841,7 +928,12 @@ if sentinel.exists():
             self.assertEqual(verified.root, root.resolve())
             self.assertEqual(verified.release_version, spec.release_version)
             self.assertEqual(verified.app_version, spec.app_version)
-            self.assertEqual(verified.model_version, spec.model_version)
+            self.assertEqual(verified.component_id, "knee42-v11-integrity-fixture")
+            self.assertEqual(verified.model_version, spec.default_model_version)
+            self.assertEqual(
+                verified.model_component_manifest_sha256,
+                sha256(root / "model" / spec.component_manifest_name),
+            )
             self.assertEqual(verified.label_count, 42)
             self.assertEqual(verified.input_shape, (1, 64, 438))
             self.assertEqual(verified.source_commit, "a" * 40)
@@ -857,11 +949,13 @@ if sentinel.exists():
             with self.assertRaises(TypeError):
                 verified.file_hashes["extra"] = "0" * 64  # type: ignore[index]
 
-    def test_legacy_runtime_reexports_the_shared_integrity_error_and_hash_helper(self):
+    def test_runtime_reexports_only_the_shared_integrity_error(self):
         from recognition.realtime import knee42_integrity
 
         self.assertIs(knee42_ivcam.IntegrityError, knee42_integrity.IntegrityError)
-        self.assertIs(knee42_ivcam.sha256_file, knee42_integrity.sha256_file)
+        self.assertFalse(hasattr(knee42_ivcam, "verify_integrity_manifest"))
+        self.assertFalse(hasattr(knee42_ivcam, "parse_sha256_manifest"))
+        self.assertFalse(hasattr(knee42_ivcam, "sha256_file"))
 
 
 if __name__ == "__main__":

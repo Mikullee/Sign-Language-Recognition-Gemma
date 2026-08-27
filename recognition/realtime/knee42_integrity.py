@@ -6,7 +6,7 @@ import json
 import os
 import re
 import stat
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Mapping
@@ -18,7 +18,7 @@ COMMIT_PATTERN = re.compile(r"[0-9a-f]{40}")
 LICENSE_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9.+-]*")
 MANIFEST_LINE_PATTERN = re.compile(r"([0-9A-Fa-f]{64})[ \t]+(\*?)(.+)")
 CANONICAL_RELEASE_SPEC_SHA256 = (
-    "1b56eeef76641f0d40604217ade8804c87ea9a901b0ca95514479a9a4fd53f6e"
+    "b9559421fc90f37a6e42d8fefa488ca59ff4f3af4e53c190d461ba127322623c"
 )
 DEFAULT_RELEASE_SPEC_PATH = (
     Path(__file__).resolve().parents[2]
@@ -33,8 +33,22 @@ VERIFIER_REQUIRED_RELEASE_PATHS = frozenset(
         "packaging/knee42_ivcam/release_spec.json",
         "auto_trigger_knee_ivcam_local.json",
         "auto_trigger_provenance.json",
+        "recognition/__init__.py",
+        "recognition/inference/__init__.py",
+        "recognition/inference/daily30_sentence_model_utils.py",
+        "recognition/realtime/__init__.py",
         "recognition/realtime/auto_trigger.py",
+        "recognition/realtime/knee42_capture.py",
+        "recognition/realtime/knee42_clock.py",
         "recognition/realtime/knee42_controllers.py",
+        "recognition/realtime/knee42_display.py",
+        "recognition/realtime/knee42_golden.py",
+        "recognition/realtime/knee42_integrity.py",
+        "recognition/realtime/knee42_ivcam.py",
+        "recognition/realtime/knee42_orientation.py",
+        "recognition/realtime/knee42_preprocessing.py",
+        "recognition/realtime/knee42_session_recording.py",
+        "recognition/realtime/probability_reporting.py",
     }
 )
 
@@ -56,7 +70,8 @@ class ReleaseSpec:
     source_sha256: str
     release_version: str
     app_version: str
-    model_version: str
+    default_model_version: str
+    component_manifest_name: str
     label_count: int
     input_shape: tuple[int, int, int]
     artifact_names: Mapping[str, str]
@@ -95,19 +110,45 @@ class ReleaseSpec:
             MappingProxyType(dict(self.license_identifiers)),
         )
 
+@dataclass(frozen=True)
+class ComponentManifest:
+    source_sha256: str
+    component_id: str
+    model_version: str
+    label_count: int
+    input_shape: tuple[int, int, int]
+    runtime_config_sha256: str
+    selection_ledger_sha256: str
+    payload_sha256: Mapping[str, str]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "input_shape", tuple(self.input_shape))
+        object.__setattr__(
+            self,
+            "payload_sha256",
+            MappingProxyType(dict(self.payload_sha256)),
+        )
+
 
 @dataclass(frozen=True)
 class VerifiedRelease:
     root: Path
     release_version: str
     app_version: str
+    component_id: str
     model_version: str
+    model_component_manifest_sha256: str
     label_count: int
     input_shape: tuple[int, int, int]
     source_commit: str
     dependency_lock_sha256: str
     root_manifest_sha256: str
     file_hashes: Mapping[str, str]
+    authenticated_files: Mapping[str, bytes] = field(
+        default_factory=dict,
+        repr=False,
+        compare=False,
+    )
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "input_shape", tuple(self.input_shape))
@@ -115,6 +156,16 @@ class VerifiedRelease:
             self,
             "file_hashes",
             MappingProxyType(dict(self.file_hashes)),
+        )
+        object.__setattr__(
+            self,
+            "authenticated_files",
+            MappingProxyType(
+                {
+                    str(relative): bytes(payload)
+                    for relative, payload in self.authenticated_files.items()
+                }
+            ),
         )
 
 
@@ -126,11 +177,6 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _sha256_lf_normalized_file(path: Path) -> str:
-    payload = Path(path).read_bytes().replace(b"\r\n", b"\n")
-    return hashlib.sha256(payload).hexdigest()
-
-
 def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for key, value in pairs:
@@ -140,16 +186,26 @@ def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return result
 
 
-def _read_json_object(path: Path, *, description: str) -> dict[str, Any]:
+def _reject_nonfinite_json_constant(value: str) -> None:
+    raise IntegrityError(f"non-finite JSON value is forbidden: {value}")
+
+
+def parse_json_object_bytes(
+    raw_bytes: bytes,
+    *,
+    description: str,
+) -> dict[str, Any]:
+    """Strictly parse one already-captured UTF-8 JSON object snapshot."""
     try:
         payload = json.loads(
-            Path(path).read_text(encoding="utf-8"),
+            bytes(raw_bytes).decode("utf-8"),
             object_pairs_hook=_unique_json_object,
+            parse_constant=_reject_nonfinite_json_constant,
         )
     except IntegrityError:
         raise
-    except (OSError, UnicodeError, ValueError) as exc:
-        raise IntegrityError(f"cannot read {description} {Path(path).name}: {exc}") from exc
+    except (UnicodeError, ValueError) as exc:
+        raise IntegrityError(f"cannot parse {description}: {exc}") from exc
     if type(payload) is not dict:
         raise IntegrityError(f"{description} must be a JSON object")
     return payload
@@ -169,6 +225,16 @@ def _require_exact_fields(
         raise IntegrityError(f"{description} unknown field(s): {unknown}")
 
 
+def require_exact_fields(
+    payload: Mapping[str, Any],
+    expected: set[str],
+    *,
+    description: str,
+) -> None:
+    """Public exact-schema validator for authenticated JSON snapshots."""
+    _require_exact_fields(payload, expected, description=description)
+
+
 def _require_string(value: Any, *, description: str) -> str:
     if type(value) is not str or not value:
         raise IntegrityError(f"{description} must be a non-empty string")
@@ -186,6 +252,68 @@ def _require_sha256(value: Any, *, description: str) -> str:
     if SHA256_PATTERN.fullmatch(text) is None:
         raise IntegrityError(f"{description} is invalid: {text!r}")
     return text
+
+
+def require_sha256(value: Any, *, description: str) -> str:
+    """Public lowercase SHA-256 field validator."""
+    return _require_sha256(value, description=description)
+
+
+def read_authenticated_bytes(
+    path: Path,
+    *,
+    expected_sha256: str,
+    description: str,
+) -> bytes:
+    """Read once, hash those exact immutable bytes, and return that snapshot."""
+    wanted = _require_sha256(expected_sha256, description=f"{description} SHA-256")
+    source = Path(path)
+    try:
+        raw_bytes = source.read_bytes()
+    except OSError as exc:
+        raise IntegrityError(f"cannot read {description} {source}: {exc}") from exc
+    actual = hashlib.sha256(raw_bytes).hexdigest()
+    if actual != wanted:
+        raise IntegrityError(
+            f"{description} SHA-256 mismatch for {source.name}: "
+            f"expected {wanted}, actual {actual}"
+        )
+    return raw_bytes
+
+
+def authenticated_release_bytes(
+    release: VerifiedRelease,
+    relative_path: str,
+    *,
+    description: str,
+) -> bytes:
+    """Return one immutable release snapshot already bound to the root anchor."""
+    if not isinstance(release, VerifiedRelease):
+        raise IntegrityError("trusted release must be a VerifiedRelease")
+    relative = _normalize_relative_path(
+        relative_path,
+        description=f"{description} relative path",
+    )
+    expected = (
+        release.root_manifest_sha256
+        if relative == "integrity_manifest.sha256"
+        else release.file_hashes.get(relative)
+    )
+    if expected is None:
+        raise IntegrityError(f"trusted release missing {description}: {relative}")
+    raw_bytes = release.authenticated_files.get(relative)
+    if raw_bytes is None:
+        raise IntegrityError(
+            f"trusted release missing authenticated bytes for {description}: {relative}"
+        )
+    snapshot = bytes(raw_bytes)
+    actual = hashlib.sha256(snapshot).hexdigest()
+    if actual != expected:
+        raise IntegrityError(
+            f"authenticated {description} SHA-256 mismatch: "
+            f"expected {expected}, actual {actual}"
+        )
+    return snapshot
 
 
 def _normalize_relative_path(value: Any, *, description: str) -> str:
@@ -237,16 +365,18 @@ def _load_layout(value: Any, *, description: str, basenames_only: bool) -> tuple
 def load_release_spec(path: Path) -> ReleaseSpec:
     """Load the canonical release spec with strict schema and value validation."""
     spec_path = Path(path)
-    payload = _read_json_object(spec_path, description="release spec")
     try:
-        source_sha256 = _sha256_lf_normalized_file(spec_path)
+        raw_bytes = spec_path.read_bytes()
     except OSError as exc:
-        raise IntegrityError(f"cannot hash release spec {spec_path}: {exc}") from exc
+        raise IntegrityError(f"cannot read release spec {spec_path}: {exc}") from exc
+    payload = parse_json_object_bytes(raw_bytes, description="release spec")
+    source_sha256 = hashlib.sha256(raw_bytes.replace(b"\r\n", b"\n")).hexdigest()
     expected_fields = {
         "schema_version",
         "release_version",
         "app_version",
-        "model_version",
+        "default_model_version",
+        "component_manifest_name",
         "label_count",
         "input_shape",
         "artifact_names",
@@ -263,15 +393,24 @@ def load_release_spec(path: Path) -> ReleaseSpec:
         payload["release_version"], description="release spec release_version"
     )
     app_version = _require_string(payload["app_version"], description="release spec app_version")
-    model_version = _require_string(
-        payload["model_version"], description="release spec model_version"
+    default_model_version = _require_string(
+        payload["default_model_version"],
+        description="release spec default_model_version",
     )
     if re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+-v[0-9]+\.[0-9]+", release_version) is None:
         raise IntegrityError("release spec release_version has an invalid value")
     if re.fullmatch(r"v[0-9]+\.[0-9]+", app_version) is None:
         raise IntegrityError("release spec app_version has an invalid value")
-    if re.fullmatch(r"v[0-9]+", model_version) is None:
-        raise IntegrityError("release spec model_version has an invalid value")
+    if re.fullmatch(r"v[0-9]+", default_model_version) is None:
+        raise IntegrityError("release spec default_model_version has an invalid value")
+    component_manifest_name = _normalize_relative_path(
+        payload["component_manifest_name"],
+        description="release spec component_manifest_name",
+    )
+    if "/" in component_manifest_name or component_manifest_name != "component_manifest.json":
+        raise IntegrityError(
+            "release spec component_manifest_name must be component_manifest.json"
+        )
 
     label_count = payload["label_count"]
     if type(label_count) is not int or label_count <= 0:
@@ -361,6 +500,11 @@ def load_release_spec(path: Path) -> ReleaseSpec:
         description="release spec required model layout",
         basenames_only=True,
     )
+    if component_manifest_name not in required_model_layout:
+        raise IntegrityError(
+            "release spec required model layout omits component manifest: "
+            f"{component_manifest_name}"
+        )
     missing_verifier_paths = sorted(
         VERIFIER_REQUIRED_RELEASE_PATHS - set(required_release_root)
     )
@@ -398,7 +542,8 @@ def load_release_spec(path: Path) -> ReleaseSpec:
         source_sha256=source_sha256,
         release_version=release_version,
         app_version=app_version,
-        model_version=model_version,
+        default_model_version=default_model_version,
+        component_manifest_name=component_manifest_name,
         label_count=label_count,
         input_shape=input_shape,
         artifact_names=artifacts,
@@ -410,13 +555,157 @@ def load_release_spec(path: Path) -> ReleaseSpec:
     )
 
 
-def parse_sha256_manifest(path: Path) -> Mapping[str, str]:
-    """Parse a sha256sum manifest and reject unsafe or ambiguous paths."""
-    manifest_path = Path(path)
+def load_component_manifest(
+    path: Path,
+    *,
+    expected_sha256: str,
+    spec: ReleaseSpec,
+) -> ComponentManifest:
+    """Authenticate raw component bytes before parsing the strict component schema."""
+    raw_bytes = read_authenticated_bytes(
+        path,
+        expected_sha256=expected_sha256,
+        description="component manifest",
+    )
+    return load_component_manifest_bytes(
+        raw_bytes,
+        expected_sha256=expected_sha256,
+        spec=spec,
+    )
+
+
+def load_component_manifest_bytes(
+    raw_bytes: bytes,
+    *,
+    expected_sha256: str,
+    spec: ReleaseSpec,
+) -> ComponentManifest:
+    """Authenticate and strictly parse one captured component-manifest snapshot."""
+    trusted_hash = _require_sha256(
+        expected_sha256,
+        description="expected component manifest SHA-256",
+    )
+    snapshot = bytes(raw_bytes)
+    actual_hash = hashlib.sha256(snapshot).hexdigest()
+    if actual_hash != trusted_hash:
+        raise IntegrityError(
+            "component manifest SHA-256 mismatch: "
+            f"expected {trusted_hash}, actual {actual_hash}"
+        )
+
+    payload = parse_json_object_bytes(snapshot, description="component manifest")
+    _require_exact_fields(
+        payload,
+        {
+            "schema_version",
+            "component_id",
+            "model_version",
+            "label_count",
+            "input_shape",
+            "runtime_config_sha256",
+            "selection_ledger_sha256",
+            "payload_sha256",
+        },
+        description="component manifest",
+    )
+    if type(payload["schema_version"]) is not int or payload["schema_version"] != 1:
+        raise IntegrityError("component manifest schema_version must be integer 1")
+    component_id = _require_string(
+        payload["component_id"], description="component manifest component_id"
+    )
+    if re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,127}", component_id) is None:
+        raise IntegrityError("component manifest component_id has an invalid value")
+    model_version = _require_string(
+        payload["model_version"], description="component manifest model_version"
+    )
+    if re.fullmatch(r"v[0-9]+", model_version) is None:
+        raise IntegrityError("component manifest model_version has an invalid value")
+    if type(payload["label_count"]) is not int or payload["label_count"] != spec.label_count:
+        raise IntegrityError(
+            "component manifest label_count mismatch: "
+            f"expected {spec.label_count}, got {payload['label_count']!r}"
+        )
+    raw_shape = payload["input_shape"]
+    if (
+        type(raw_shape) is not list
+        or len(raw_shape) != 3
+        or any(type(item) is not int for item in raw_shape)
+        or tuple(raw_shape) != spec.input_shape
+    ):
+        raise IntegrityError(
+            "component manifest input_shape mismatch: "
+            f"expected {list(spec.input_shape)}, got {raw_shape!r}"
+        )
+
+    raw_hashes = _require_mapping(
+        payload["payload_sha256"], description="component manifest payload_sha256"
+    )
+    expected_payload_names = set(spec.required_model_layout) - {
+        spec.component_manifest_name,
+        "integrity_manifest.sha256",
+    }
+    actual_payload_names: set[str] = set()
+    payload_hashes: dict[str, str] = {}
+    for raw_name, raw_digest in raw_hashes.items():
+        name = _normalize_relative_path(
+            raw_name, description="component manifest payload"
+        )
+        if "/" in name:
+            raise IntegrityError(
+                f"component manifest payload name must be a basename: {raw_name}"
+            )
+        actual_payload_names.add(name)
+        payload_hashes[name] = _require_sha256(
+            raw_digest,
+            description=f"component manifest payload SHA-256 {name}",
+        )
+    missing = sorted(expected_payload_names - actual_payload_names)
+    unexpected = sorted(actual_payload_names - expected_payload_names)
+    if missing:
+        raise IntegrityError(f"component manifest payload missing path(s): {missing}")
+    if unexpected:
+        raise IntegrityError(f"component manifest payload unexpected path(s): {unexpected}")
+    runtime_config_sha256 = _require_sha256(
+        payload["runtime_config_sha256"],
+        description="component manifest runtime_config_sha256",
+    )
+    if runtime_config_sha256 != payload_hashes["runtime_config.json"]:
+        raise IntegrityError(
+            "component manifest runtime_config_sha256 must equal "
+            "payload_sha256['runtime_config.json']"
+        )
+    selection_ledger_sha256 = _require_sha256(
+        payload["selection_ledger_sha256"],
+        description="component manifest selection_ledger_sha256",
+    )
+    if selection_ledger_sha256 != payload_hashes["selection_ledger.json"]:
+        raise IntegrityError(
+            "component manifest selection_ledger_sha256 must equal "
+            "payload_sha256['selection_ledger.json']"
+        )
+
+    return ComponentManifest(
+        source_sha256=actual_hash,
+        component_id=component_id,
+        model_version=model_version,
+        label_count=spec.label_count,
+        input_shape=spec.input_shape,
+        runtime_config_sha256=runtime_config_sha256,
+        selection_ledger_sha256=selection_ledger_sha256,
+        payload_sha256=payload_hashes,
+    )
+
+
+def parse_sha256_manifest_bytes(
+    raw_bytes: bytes,
+    *,
+    description: str = "SHA-256 manifest",
+) -> Mapping[str, str]:
+    """Parse one captured sha256sum snapshot and reject ambiguous paths."""
     try:
-        lines = manifest_path.read_text(encoding="ascii").splitlines()
-    except (OSError, UnicodeError) as exc:
-        raise IntegrityError(f"cannot read SHA-256 manifest {manifest_path}: {exc}") from exc
+        lines = bytes(raw_bytes).decode("ascii").splitlines()
+    except UnicodeError as exc:
+        raise IntegrityError(f"cannot decode {description}: {exc}") from exc
 
     hashes: dict[str, str] = {}
     casefolded_paths: dict[str, str] = {}
@@ -444,8 +733,21 @@ def parse_sha256_manifest(path: Path) -> Mapping[str, str]:
         casefolded_paths[folded] = normalized
         hashes[normalized] = digest
     if not hashes:
-        raise IntegrityError(f"SHA-256 manifest is empty: {manifest_path}")
+        raise IntegrityError(f"{description} is empty")
     return MappingProxyType(hashes)
+
+
+def parse_sha256_manifest(path: Path) -> Mapping[str, str]:
+    """Read and parse a sha256sum manifest once."""
+    manifest_path = Path(path)
+    try:
+        raw_bytes = manifest_path.read_bytes()
+    except OSError as exc:
+        raise IntegrityError(f"cannot read SHA-256 manifest {manifest_path}: {exc}") from exc
+    return parse_sha256_manifest_bytes(
+        raw_bytes,
+        description=f"SHA-256 manifest {manifest_path}",
+    )
 
 
 def _relative_files(root: Path) -> set[str]:
@@ -488,12 +790,21 @@ def _relative_files(root: Path) -> set[str]:
     return files
 
 
-def _validate_version_manifest(path: Path, spec: ReleaseSpec) -> dict[str, Any]:
-    payload = _read_json_object(path, description="VERSION_MANIFEST.json")
+def _validate_version_manifest_bytes(
+    raw_bytes: bytes,
+    spec: ReleaseSpec,
+    component: ComponentManifest,
+) -> dict[str, Any]:
+    payload = parse_json_object_bytes(
+        raw_bytes,
+        description="VERSION_MANIFEST.json",
+    )
     expected_fields = {
         "release_version",
         "app_version",
+        "component_id",
         "model_version",
+        "model_component_manifest_sha256",
         "label_count",
         "input_shape",
         "source_commit",
@@ -512,7 +823,9 @@ def _validate_version_manifest(path: Path, spec: ReleaseSpec) -> dict[str, Any]:
     expected_values: dict[str, Any] = {
         "release_version": spec.release_version,
         "app_version": spec.app_version,
-        "model_version": spec.model_version,
+        "component_id": component.component_id,
+        "model_version": component.model_version,
+        "model_component_manifest_sha256": component.source_sha256,
         "label_count": spec.label_count,
         "input_shape": list(spec.input_shape),
     }
@@ -551,34 +864,27 @@ def verify_release_root(
     manifest_path = release_root / "integrity_manifest.sha256"
     if not manifest_path.is_file():
         raise IntegrityError("missing path: integrity_manifest.sha256")
-    try:
-        actual_manifest_hash = sha256_file(manifest_path)
-    except OSError as exc:
-        raise IntegrityError(
-            f"cannot hash root integrity manifest {manifest_path}: {exc}"
-        ) from exc
-    if actual_manifest_hash != trusted_manifest_hash:
-        raise IntegrityError(
-            "root integrity manifest SHA-256 mismatch for integrity_manifest.sha256: "
-            f"expected {trusted_manifest_hash}, actual {actual_manifest_hash}"
-        )
+    manifest_bytes = read_authenticated_bytes(
+        manifest_path,
+        expected_sha256=trusted_manifest_hash,
+        description="root integrity manifest",
+    )
+    actual_manifest_hash = hashlib.sha256(manifest_bytes).hexdigest()
 
     if spec is None:
-        try:
-            actual_spec_hash = _sha256_lf_normalized_file(DEFAULT_RELEASE_SPEC_PATH)
-        except OSError as exc:
-            raise IntegrityError(
-                f"cannot hash canonical release spec {DEFAULT_RELEASE_SPEC_PATH}: {exc}"
-            ) from exc
-        if actual_spec_hash != CANONICAL_RELEASE_SPEC_SHA256:
+        trusted_spec = load_release_spec(DEFAULT_RELEASE_SPEC_PATH)
+        if trusted_spec.source_sha256 != CANONICAL_RELEASE_SPEC_SHA256:
             raise IntegrityError(
                 "canonical release spec SHA-256 mismatch: "
-                f"expected {CANONICAL_RELEASE_SPEC_SHA256}, actual {actual_spec_hash}"
+                f"expected {CANONICAL_RELEASE_SPEC_SHA256}, "
+                f"actual {trusted_spec.source_sha256}"
             )
-        trusted_spec = load_release_spec(DEFAULT_RELEASE_SPEC_PATH)
     else:
         trusted_spec = spec
-    hashes = parse_sha256_manifest(manifest_path)
+    hashes = parse_sha256_manifest_bytes(
+        manifest_bytes,
+        description="root integrity manifest integrity_manifest.sha256",
+    )
     if "integrity_manifest.sha256" in hashes:
         raise IntegrityError("integrity manifest must not list itself: integrity_manifest.sha256")
 
@@ -598,15 +904,29 @@ def verify_release_root(
             f"integrity manifest has unexpected path(s): {unexpected_manifest_paths}"
         )
 
-    packaged_spec_relative = "packaging/knee42_ivcam/release_spec.json"
-    try:
-        actual_packaged_spec_hash = _sha256_lf_normalized_file(
-            release_root.joinpath(*packaged_spec_relative.split("/"))
+    expected = set(hashes) | {"integrity_manifest.sha256"}
+    missing = sorted(expected - actual)
+    unexpected = sorted(actual - expected)
+    if missing:
+        raise IntegrityError(f"missing file path(s): {missing}")
+    if unexpected:
+        raise IntegrityError(f"unexpected file path(s): {unexpected}")
+
+    authenticated_files: dict[str, bytes] = {
+        "integrity_manifest.sha256": manifest_bytes,
+    }
+    for relative, wanted in hashes.items():
+        path = release_root.joinpath(*relative.split("/"))
+        authenticated_files[relative] = read_authenticated_bytes(
+            path,
+            expected_sha256=wanted,
+            description="release path",
         )
-    except OSError as exc:
-        raise IntegrityError(
-            f"cannot hash release path {packaged_spec_relative}: {exc}"
-        ) from exc
+
+    packaged_spec_relative = "packaging/knee42_ivcam/release_spec.json"
+    actual_packaged_spec_hash = hashlib.sha256(
+        authenticated_files[packaged_spec_relative].replace(b"\r\n", b"\n")
+    ).hexdigest()
     if actual_packaged_spec_hash != trusted_spec.source_sha256:
         raise IntegrityError(
             f"canonical SHA-256 mismatch for {packaged_spec_relative}: "
@@ -614,14 +934,8 @@ def verify_release_root(
         )
 
     canonical_hashes = {
-        **{
-            f"model/{filename}": digest
-            for filename, digest in trusted_spec.model_files.items()
-        },
-        **{
-            f"model/{trusted_spec.assets[name].filename}": trusted_spec.assets[name].sha256
-            for name in ("hand_landmarker_task", "pose_landmarker_task")
-        },
+        f"model/{trusted_spec.assets[name].filename}": trusted_spec.assets[name].sha256
+        for name in ("hand_landmarker_task", "pose_landmarker_task")
     }
     for relative, wanted in canonical_hashes.items():
         declared = hashes.get(relative)
@@ -631,28 +945,40 @@ def verify_release_root(
                 f"expected {wanted}, manifest declares {declared}"
             )
 
-    expected = set(hashes) | {"integrity_manifest.sha256"}
-    missing = sorted(expected - actual)
-    unexpected = sorted(actual - expected)
-    if missing:
-        raise IntegrityError(f"missing file path(s): {missing}")
-    if unexpected:
-        raise IntegrityError(f"unexpected file path(s): {unexpected}")
-
-    for relative, wanted in hashes.items():
-        path = release_root.joinpath(*relative.split("/"))
-        try:
-            actual_hash = sha256_file(path)
-        except OSError as exc:
-            raise IntegrityError(f"cannot hash release path {relative}: {exc}") from exc
-        if actual_hash != wanted:
+    component_relative = f"model/{trusted_spec.component_manifest_name}"
+    component = load_component_manifest_bytes(
+        authenticated_files[component_relative],
+        expected_sha256=hashes[component_relative],
+        spec=trusted_spec,
+    )
+    for name, wanted in component.payload_sha256.items():
+        relative = f"model/{name}"
+        declared = hashes.get(relative)
+        if declared != wanted:
             raise IntegrityError(
-                f"SHA-256 mismatch for {relative}: expected {wanted}, actual {actual_hash}"
+                f"component payload SHA-256 mismatch for {relative}: "
+                f"component declares {wanted}, root manifest declares {declared}"
             )
-
-    version = _validate_version_manifest(
-        release_root / "VERSION_MANIFEST.json",
+    internal_manifest = parse_sha256_manifest_bytes(
+        authenticated_files["model/integrity_manifest.sha256"],
+        description="component integrity manifest",
+    )
+    if dict(internal_manifest) != dict(component.payload_sha256):
+        missing = sorted(set(component.payload_sha256) - set(internal_manifest))
+        unexpected = sorted(set(internal_manifest) - set(component.payload_sha256))
+        mismatched = sorted(
+            name
+            for name in set(component.payload_sha256) & set(internal_manifest)
+            if component.payload_sha256[name] != internal_manifest[name]
+        )
+        raise IntegrityError(
+            "component payload SHA-256 mismatch with internal integrity manifest: "
+            f"missing={missing}, unexpected={unexpected}, mismatched={mismatched}"
+        )
+    version = _validate_version_manifest_bytes(
+        authenticated_files["VERSION_MANIFEST.json"],
         trusted_spec,
+        component,
     )
     lock_relative = "requirements-windows-runtime.lock.txt"
     if version["dependency_lock_sha256"] != hashes[lock_relative]:
@@ -665,11 +991,14 @@ def verify_release_root(
         root=release_root,
         release_version=trusted_spec.release_version,
         app_version=trusted_spec.app_version,
-        model_version=trusted_spec.model_version,
+        component_id=component.component_id,
+        model_version=component.model_version,
+        model_component_manifest_sha256=component.source_sha256,
         label_count=trusted_spec.label_count,
         input_shape=trusted_spec.input_shape,
         source_commit=version["source_commit"],
         dependency_lock_sha256=version["dependency_lock_sha256"],
         root_manifest_sha256=actual_manifest_hash,
         file_hashes=MappingProxyType(dict(hashes)),
+        authenticated_files=MappingProxyType(authenticated_files),
     )

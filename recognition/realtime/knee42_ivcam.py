@@ -3,11 +3,12 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import io
 import json
 import time
 import warnings
 from contextlib import ExitStack
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
@@ -26,9 +27,16 @@ from recognition.realtime.knee42_display import (
 from recognition.realtime.knee42_integrity import (
     IntegrityError,
     VerifiedRelease,
-    parse_sha256_manifest,
-    sha256_file,
+    authenticated_release_bytes,
+    parse_json_object_bytes,
+    parse_sha256_manifest_bytes,
+    require_exact_fields,
     verify_release_root,
+)
+from recognition.realtime.knee42_golden import (
+    load_golden_contract,
+    materialize_golden_tensor,
+    verify_golden_result,
 )
 from recognition.realtime.knee42_orientation import (
     InputOrientation,
@@ -57,6 +65,199 @@ from recognition.realtime.probability_reporting import (
 
 
 LABELS = [f"K42_{number:02d}" for number in range(1, 43)]
+APP_VERSION = "v13.1"
+RELEASE_VERSION = "v1.0.1-v13.1"
+STARTUP_ENTRY_MODULE = "recognition.realtime.knee42_ivcam"
+
+
+def parse_knee42_label_map_bytes(
+    raw_bytes: bytes,
+    *,
+    description: str,
+) -> list[str]:
+    """Strictly parse the one canonical 42-label mapping from trusted bytes."""
+    payload = parse_json_object_bytes(raw_bytes, description=description)
+    require_exact_fields(
+        payload,
+        {"idx_to_label", "label_to_idx"},
+        description=description,
+    )
+    raw_labels = payload["idx_to_label"]
+    if type(raw_labels) is not list or len(raw_labels) != 42:
+        raise IntegrityError(f"{description} must contain exactly 42 ordered labels")
+    if any(type(label) is not str for label in raw_labels):
+        raise IntegrityError(f"{description} contains a non-string label")
+    labels = list(raw_labels)
+    if len(set(labels)) != 42:
+        raise IntegrityError(f"{description} contains a duplicate label")
+    if labels != LABELS:
+        raise IntegrityError(f"{description} has wrong ordered Knee42 labels")
+    raw_indices = payload["label_to_idx"]
+    if type(raw_indices) is not dict:
+        raise IntegrityError(f"{description} label_to_idx is inconsistent")
+    expected_indices = {label: index for index, label in enumerate(LABELS)}
+    if (
+        set(raw_indices) != set(expected_indices)
+        or any(type(value) is not int for value in raw_indices.values())
+        or raw_indices != expected_indices
+    ):
+        raise IntegrityError(f"{description} label_to_idx is inconsistent")
+    return labels
+
+
+def load_verified_labels(
+    package_root: Path,
+    *,
+    trusted_release: VerifiedRelease,
+) -> list[str]:
+    """Load the exact ordered Knee42 labels from root-authenticated bytes."""
+    package_root = Path(package_root).resolve()
+    if not isinstance(trusted_release, VerifiedRelease):
+        raise IntegrityError("trusted release must be a VerifiedRelease")
+    if trusted_release.root.resolve() != package_root:
+        raise IntegrityError("trusted release root mismatch for label map")
+    relative = "model/label_map_knee42.json"
+    raw_bytes = authenticated_release_bytes(
+        trusted_release,
+        relative,
+        description="verified label map",
+    )
+    return parse_knee42_label_map_bytes(
+        raw_bytes,
+        description="verified label map",
+    )
+
+
+def _trusted_startup_hash(
+    release: VerifiedRelease,
+    relative: str,
+) -> str:
+    digest = release.file_hashes.get(relative)
+    if digest is None:
+        raise IntegrityError(f"trusted release missing startup hash for {relative}")
+    return digest
+
+
+def build_startup_record(
+    release: VerifiedRelease,
+    trigger_config: Any,
+    *,
+    trusted_labels: Sequence[str],
+    clock_policy: str,
+    current_clock_mode: str,
+    rotation_requested: RotationSetting,
+    rotation_resolved: int,
+    input_mirror: bool,
+    display_mirror: bool,
+) -> dict[str, Any]:
+    """Build the exact verified identity event without reading untrusted metadata."""
+    if not isinstance(release, VerifiedRelease):
+        raise IntegrityError("startup release must be a VerifiedRelease")
+    from recognition.realtime.auto_trigger import AutoTriggerConfig
+
+    if type(trigger_config) is not AutoTriggerConfig:
+        raise IntegrityError(
+            "startup trigger config must be an exact AutoTriggerConfig"
+        )
+    expected_trigger_fields = tuple(
+        field.name for field in fields(AutoTriggerConfig)
+    )
+    trigger_payload = asdict(trigger_config)
+    if tuple(trigger_payload) != expected_trigger_fields or len(trigger_payload) != 25:
+        raise IntegrityError(
+            "startup AutoTriggerConfig field schema mismatch: "
+            f"expected {expected_trigger_fields}, got {tuple(trigger_payload)}"
+        )
+    if release.label_count != 42 or release.input_shape != (1, 64, 438):
+        raise IntegrityError("startup release does not match the canonical Knee42 contract")
+    labels = list(trusted_labels)
+    if labels != LABELS:
+        raise IntegrityError("startup labels must be the verified ordered Knee42 labels")
+    if type(rotation_resolved) is not int or rotation_resolved not in {0, 90, 180, 270}:
+        raise IntegrityError("startup resolved rotation must be a right angle")
+    if type(input_mirror) is not bool or type(display_mirror) is not bool:
+        raise IntegrityError("startup mirror settings must be booleans")
+    hashes = {
+        "root_manifest_sha256": release.root_manifest_sha256,
+        "component_manifest_sha256": release.model_component_manifest_sha256,
+        "component_integrity_manifest_sha256": _trusted_startup_hash(
+            release,
+            "model/integrity_manifest.sha256",
+        ),
+        "model_sha256": _trusted_startup_hash(
+            release, "model/best_model.pt"
+        ),
+        "runtime_config_sha256": _trusted_startup_hash(
+            release, "model/runtime_config.json"
+        ),
+        "selection_ledger_sha256": _trusted_startup_hash(
+            release, "model/selection_ledger.json"
+        ),
+        "hand_landmarker_task_sha256": _trusted_startup_hash(
+            release,
+            "model/hand_landmarker.task",
+        ),
+        "pose_landmarker_task_sha256": _trusted_startup_hash(
+            release,
+            "model/pose_landmarker.task",
+        ),
+        "golden_contract_sha256": _trusted_startup_hash(
+            release, "golden_contract.json"
+        ),
+        "trigger_config_sha256": _trusted_startup_hash(
+            release,
+            "auto_trigger_knee_ivcam_local.json",
+        ),
+        "trigger_provenance_sha256": _trusted_startup_hash(
+            release,
+            "auto_trigger_provenance.json",
+        ),
+        "trigger_source_sha256": _trusted_startup_hash(
+            release,
+            "recognition/realtime/auto_trigger.py",
+        ),
+        "trigger_controller_sha256": _trusted_startup_hash(
+            release,
+            "recognition/realtime/knee42_controllers.py",
+        ),
+        "dependency_lock_sha256": release.dependency_lock_sha256,
+    }
+    return {
+        "schema_version": 1,
+        "event": "knee42_startup",
+        "entry_module": STARTUP_ENTRY_MODULE,
+        "release_version": release.release_version,
+        "app_version": release.app_version,
+        "component_id": release.component_id,
+        "model_version": release.model_version,
+        "source_commit": release.source_commit,
+        "label_count": release.label_count,
+        "labels": labels,
+        "input_shape": list(release.input_shape),
+        "hashes": hashes,
+        "clock": {
+            "policy": str(clock_policy),
+            "current_mode": str(current_clock_mode),
+        },
+        "orientation": {
+            "rotation_requested": rotation_requested,
+            "rotation_resolved": rotation_resolved,
+            "input_mirror": input_mirror,
+            "display_mirror": display_mirror,
+        },
+        "trigger_config": trigger_payload,
+    }
+
+
+def serialize_startup_record(record: dict[str, Any]) -> str:
+    """Serialize one strict, stable JSON log line."""
+    return json.dumps(
+        record,
+        ensure_ascii=False,
+        sort_keys=True,
+        allow_nan=False,
+        separators=(",", ":"),
+    )
 
 
 def load_auto_trigger_config(*args, **kwargs):
@@ -122,31 +323,9 @@ SELECTION_BOUND_FILES = frozenset(
 )
 
 
-def sha256_canonical_text_file(path: Path) -> str:
-    """Hash locked text identically after LF or Windows CRLF checkout."""
-    payload = path.read_bytes().replace(b"\r\n", b"\n")
-    return hashlib.sha256(payload).hexdigest()
-
-
-def verify_integrity_manifest(bundle_dir: Path) -> dict[str, str]:
-    bundle_dir = Path(bundle_dir).resolve()
-    manifest = bundle_dir / "integrity_manifest.sha256"
-    if not manifest.is_file():
-        raise IntegrityError(f"integrity manifest missing: {manifest}")
-    expected = dict(parse_sha256_manifest(manifest))
-    missing = sorted(REQUIRED_INTEGRITY_FILES - set(expected))
-    if missing:
-        raise IntegrityError(f"integrity manifest missing required files: {missing}")
-    for relative, wanted in expected.items():
-        path = bundle_dir / relative
-        if not path.is_file():
-            raise IntegrityError(f"integrity file missing: {relative}")
-        actual = sha256_file(path)
-        if actual != wanted:
-            raise IntegrityError(
-                f"integrity SHA-256 mismatch for {relative}: expected {wanted}, actual {actual}"
-            )
-    return expected
+def sha256_canonical_text_bytes(raw_bytes: bytes) -> str:
+    """Hash one authenticated text snapshot after canonical CRLF normalization."""
+    return hashlib.sha256(bytes(raw_bytes).replace(b"\r\n", b"\n")).hexdigest()
 
 
 def verify_auto_trigger_provenance(
@@ -169,22 +348,18 @@ def verify_auto_trigger_provenance(
         "recognition/realtime/auto_trigger.py",
         "recognition/realtime/knee42_controllers.py",
     )
-    for relative in trusted_paths:
-        declared = trusted_release.file_hashes.get(relative)
-        if declared is None:
-            raise IntegrityError(
-                f"trusted release manifest missing runtime path: {relative}"
-            )
-        path = package_root.joinpath(*relative.split("/"))
-        if not path.is_file():
-            raise IntegrityError(f"trusted release runtime file missing: {relative}")
-        actual_raw = sha256_file(path)
-        if actual_raw != declared:
-            raise IntegrityError(
-                f"trusted release manifest SHA-256 mismatch for {relative}: "
-                f"expected {declared}, actual {actual_raw}"
-            )
-    provenance = _read_json(package_root / "auto_trigger_provenance.json")
+    snapshots = {
+        relative: authenticated_release_bytes(
+            trusted_release,
+            relative,
+            description=f"runtime path {relative}",
+        )
+        for relative in trusted_paths
+    }
+    provenance = parse_json_object_bytes(
+        snapshots["auto_trigger_provenance.json"],
+        description="auto-trigger provenance",
+    )
     if not isinstance(provenance, dict):
         raise IntegrityError("auto-trigger provenance must contain a JSON object")
     if type(provenance.get("schema_version")) is not int or provenance["schema_version"] != 2:
@@ -199,23 +374,27 @@ def verify_auto_trigger_provenance(
         raise IntegrityError(
             "auto-trigger provenance trusted_root_binding must require the release manifest"
         )
-    source = package_root / "recognition" / "realtime" / "auto_trigger.py"
-    config = package_root / "auto_trigger_knee_ivcam_local.json"
     checks = (
-        ("auto-trigger source", source, "auto_trigger_source_sha256"),
+        (
+            "auto-trigger source",
+            "recognition/realtime/auto_trigger.py",
+            "auto_trigger_source_sha256",
+        ),
         (
             "auto-trigger controller",
-            package_root / "recognition" / "realtime" / "knee42_controllers.py",
+            "recognition/realtime/knee42_controllers.py",
             "auto_trigger_controller_sha256",
         ),
-        ("auto-trigger config", config, "auto_trigger_config_sha256"),
+        (
+            "auto-trigger config",
+            "auto_trigger_knee_ivcam_local.json",
+            "auto_trigger_config_sha256",
+        ),
     )
-    for description, path, key in checks:
-        if not path.is_file():
-            raise IntegrityError(f"{description} missing: {path}")
+    for description, relative, key in checks:
         wanted_value = runtime_binding.get(key)
         wanted = wanted_value if isinstance(wanted_value, str) else ""
-        actual = sha256_canonical_text_file(path)
+        actual = sha256_canonical_text_bytes(snapshots[relative])
         if len(wanted) != 64 or wanted.lower() != wanted or actual != wanted:
             raise IntegrityError(
                 f"{description} SHA-256 mismatch: expected {wanted}, actual {actual}"
@@ -278,6 +457,7 @@ def decode_logits(
 @dataclass
 class Knee42Bundle:
     root: Path
+    component_id: str
     model: BiGRUSentenceClassifier
     mean: np.ndarray
     std: np.ndarray
@@ -287,6 +467,8 @@ class Knee42Bundle:
     frame_step: int
     model_display_version: str
     device: torch.device
+    hand_landmarker_task_bytes: bytes
+    pose_landmarker_task_bytes: bytes
 
     def prepare(self, values: np.ndarray, mask: np.ndarray) -> np.ndarray:
         return materialize_sequence(
@@ -311,18 +493,65 @@ class Knee42Bundle:
         )
 
 
-def _read_json(path: Path) -> Any:
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
-        raise IntegrityError(f"cannot read validated JSON {path.name}: {exc}") from exc
-
-
-def load_bundle(bundle_dir: Path, *, device: torch.device) -> Knee42Bundle:
+def load_bundle(
+    bundle_dir: Path,
+    *,
+    device: torch.device,
+    trusted_release: VerifiedRelease,
+) -> Knee42Bundle:
     """Verify every startup artifact before deserializing the selected checkpoint."""
     bundle_dir = Path(bundle_dir).resolve()
-    verified_hashes = verify_integrity_manifest(bundle_dir)
-    ledger = _read_json(bundle_dir / "selection_ledger.json")
+    if not isinstance(trusted_release, VerifiedRelease):
+        raise IntegrityError("trusted release must be a VerifiedRelease")
+    if trusted_release.root.resolve() / "model" != bundle_dir:
+        raise IntegrityError(
+            "trusted release model root mismatch: "
+            f"expected {trusted_release.root.resolve() / 'model'}, got {bundle_dir}"
+        )
+    internal_bytes = authenticated_release_bytes(
+        trusted_release,
+        "model/integrity_manifest.sha256",
+        description="component integrity manifest",
+    )
+    verified_hashes = dict(
+        parse_sha256_manifest_bytes(
+            internal_bytes,
+            description="component integrity manifest",
+        )
+    )
+    missing = sorted(REQUIRED_INTEGRITY_FILES - set(verified_hashes))
+    unexpected = sorted(set(verified_hashes) - REQUIRED_INTEGRITY_FILES)
+    if missing:
+        raise IntegrityError(f"integrity manifest missing required files: {missing}")
+    if unexpected:
+        raise IntegrityError(f"integrity manifest has unexpected files: {unexpected}")
+    payload_bytes: dict[str, bytes] = {}
+    for name, internal_hash in verified_hashes.items():
+        relative = f"model/{name}"
+        trusted_hash = trusted_release.file_hashes.get(relative)
+        if trusted_hash != internal_hash:
+            raise IntegrityError(
+                "trusted release payload SHA-256 mismatch for "
+                f"{relative}: expected {trusted_hash}, internal manifest declares "
+                f"{internal_hash}"
+            )
+        payload_bytes[name] = authenticated_release_bytes(
+            trusted_release,
+            relative,
+            description=f"component payload {name}",
+        )
+    component_relative = "model/component_manifest.json"
+    if (
+        trusted_release.file_hashes.get(component_relative)
+        != trusted_release.model_component_manifest_sha256
+    ):
+        raise IntegrityError(
+            "trusted release component manifest SHA-256 binding mismatch"
+        )
+    ledger = parse_json_object_bytes(
+        payload_bytes["selection_ledger.json"],
+        description="selection ledger",
+    )
     if ledger.get("selection_metric") != "dev_macro_top1":
         raise IntegrityError("selection ledger is not Dev-selected")
     ledger_hashes = ledger.get("artifacts", {})
@@ -330,8 +559,14 @@ def load_bundle(bundle_dir: Path, *, device: torch.device) -> Knee42Bundle:
         if ledger_hashes.get(name) != verified_hashes.get(name):
             raise IntegrityError(f"selection ledger SHA-256 mismatch for {name}")
 
-    runtime = _read_json(bundle_dir / "runtime_config.json")
-    feature = _read_json(bundle_dir / "feature_config.json")
+    runtime = parse_json_object_bytes(
+        payload_bytes["runtime_config.json"],
+        description="runtime config",
+    )
+    feature = parse_json_object_bytes(
+        payload_bytes["feature_config.json"],
+        description="feature config",
+    )
     expected_runtime = {
         "sequence_length": 64,
         "landmark_value_dim": LANDMARK_DIM,
@@ -356,17 +591,25 @@ def load_bundle(bundle_dir: Path, *, device: torch.device) -> Knee42Bundle:
     ):
         raise IntegrityError("feature config does not match the locked upright-video contract")
 
-    label_payload = _read_json(bundle_dir / "label_map_knee42.json")
-    labels = [str(item) for item in label_payload.get("idx_to_label", [])]
-    label_to_idx = {str(key): int(value) for key, value in label_payload.get("label_to_idx", {}).items()}
-    if labels != LABELS or label_to_idx != {label: index for index, label in enumerate(LABELS)}:
-        raise IntegrityError("label map does not match the ordered Knee42 contract")
-    display_text = {str(key): str(value) for key, value in _read_json(bundle_dir / "display_text_map.json").items()}
+    labels = parse_knee42_label_map_bytes(
+        payload_bytes["label_map_knee42.json"],
+        description="component label map",
+    )
+    display_text = {
+        str(key): str(value)
+        for key, value in parse_json_object_bytes(
+            payload_bytes["display_text_map.json"],
+            description="display text map",
+        ).items()
+    }
     if set(display_text) != set(LABELS) or any(not value.strip() for value in display_text.values()):
         raise IntegrityError("display text map is incomplete")
 
     try:
-        with np.load(bundle_dir / "standardizer_train_only.npz", allow_pickle=False) as payload:
+        with np.load(
+            io.BytesIO(payload_bytes["standardizer_train_only.npz"]),
+            allow_pickle=False,
+        ) as payload:
             mean = payload["mean"].astype(np.float32)
             std = payload["std"].astype(np.float32)
     except (OSError, KeyError, ValueError) as exc:
@@ -376,7 +619,7 @@ def load_bundle(bundle_dir: Path, *, device: torch.device) -> Knee42Bundle:
 
     try:
         checkpoint = torch.load(
-            bundle_dir / "best_model.pt",
+            io.BytesIO(payload_bytes["best_model.pt"]),
             map_location=device,
             weights_only=True,
         )
@@ -394,6 +637,7 @@ def load_bundle(bundle_dir: Path, *, device: torch.device) -> Knee42Bundle:
         raise IntegrityError(f"cannot load locked model: {exc}") from exc
     return Knee42Bundle(
         root=bundle_dir,
+        component_id=trusted_release.component_id,
         model=model,
         mean=mean,
         std=std,
@@ -401,8 +645,10 @@ def load_bundle(bundle_dir: Path, *, device: torch.device) -> Knee42Bundle:
         display_text=display_text,
         sequence_length=64,
         frame_step=2,
-        model_display_version=str(runtime.get("model_display_version", "v11")),
+        model_display_version=trusted_release.model_version,
         device=device,
+        hand_landmarker_task_bytes=payload_bytes["hand_landmarker.task"],
+        pose_landmarker_task_bytes=payload_bytes["pose_landmarker.task"],
     )
 
 
@@ -514,6 +760,11 @@ class MediapipeDetectors:
         self._mp = None
         self._hands = None
         self._pose = None
+        self._real_mediapipe_created = False
+
+    @property
+    def real_mediapipe_created(self) -> bool:
+        return self._real_mediapipe_created
 
     def __enter__(self):
         import mediapipe as mp
@@ -523,12 +774,16 @@ class MediapipeDetectors:
         from mediapipe.tasks.python.vision.pose_landmarker import PoseLandmarker, PoseLandmarkerOptions
 
         hand_options = HandLandmarkerOptions(
-            base_options=BaseOptions(model_asset_path=str(self.bundle.root / "hand_landmarker.task")),
+            base_options=BaseOptions(
+                model_asset_buffer=self.bundle.hand_landmarker_task_bytes,
+            ),
             running_mode=VisionTaskRunningMode.IMAGE,
             num_hands=2,
         )
         pose_options = PoseLandmarkerOptions(
-            base_options=BaseOptions(model_asset_path=str(self.bundle.root / "pose_landmarker.task")),
+            base_options=BaseOptions(
+                model_asset_buffer=self.bundle.pose_landmarker_task_bytes,
+            ),
             running_mode=VisionTaskRunningMode.IMAGE,
         )
         with ExitStack() as stack:
@@ -540,6 +795,7 @@ class MediapipeDetectors:
         self._hands = hands
         self._pose = pose
         self._mp = mp
+        self._real_mediapipe_created = True
         return self
 
     def extract(self, frame_bgr: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -590,36 +846,84 @@ def run_self_test(
     device: torch.device,
     expected_root_manifest_sha256: str,
     detector_factory: Callable[..., Any] = create_mediapipe_detectors,
+    startup_sink: Callable[[str], Any] = print,
 ) -> dict[str, Any]:
+    if not isinstance(device, torch.device) or device.type != "cpu":
+        raise IntegrityError("deterministic self-test requires a CPU torch.device")
     package_root = Path(bundle_dir).resolve().parent
     trusted_release = verify_release_root(
         package_root,
         expected_root_manifest_sha256=expected_root_manifest_sha256,
     )
     verify_auto_trigger_provenance(package_root, trusted_release=trusted_release)
-    load_formal_auto_trigger_config(package_root)
-    bundle = load_bundle(bundle_dir, device=device)
-    with detector_factory(bundle, pixels_mirrored=False):
-        mediapipe_created = True
-    raw = np.zeros((5, LANDMARK_DIM), dtype=np.float32)
-    mask = np.ones_like(raw, dtype=np.bool_)
-    pose_index = {source: target for target, source in enumerate(POSE_KEEP)}
-    raw[:, pose_index[11] * 3 : pose_index[11] * 3 + 3] = (-0.5, 0.0, 0.0)
-    raw[:, pose_index[12] * 3 : pose_index[12] * 3 + 3] = (0.5, 0.0, 0.0)
-    normalized = np.stack([normalize_frame(frame, frame_mask) for frame, frame_mask in zip(raw, mask)])
-    prepared = bundle.prepare(normalized, mask)
+    trigger_config = load_formal_auto_trigger_config(
+        package_root,
+        authenticated_bytes=authenticated_release_bytes(
+            trusted_release,
+            "auto_trigger_knee_ivcam_local.json",
+            description="formal auto-trigger config",
+        ),
+    )
+    trusted_labels = load_verified_labels(
+        package_root,
+        trusted_release=trusted_release,
+    )
+    golden_contract = load_golden_contract(
+        package_root / "golden_contract.json",
+        trusted_release=trusted_release,
+    )
+    startup_sink(
+        serialize_startup_record(
+            build_startup_record(
+                trusted_release,
+                trigger_config,
+                trusted_labels=trusted_labels,
+                clock_policy="deterministic_self_test",
+                current_clock_mode="deterministic_golden_contract",
+                rotation_requested=0,
+                rotation_resolved=0,
+                input_mirror=False,
+                display_mirror=False,
+            )
+        )
+    )
+    bundle = load_bundle(
+        bundle_dir,
+        device=device,
+        trusted_release=trusted_release,
+    )
+    prepared = materialize_golden_tensor(bundle.mean, bundle.std)
     logits = bundle.forward_prepared(prepared)
     if list(logits.shape) != [1, 42]:
         raise RuntimeError(f"self-test model output shape mismatch: {list(logits.shape)}")
+    verify_golden_result(golden_contract, prepared, logits)
+    detector_context = detector_factory(bundle, pixels_mirrored=False)
+    detector_constructed = False
+    detector_test_double = detector_factory is not create_mediapipe_detectors
+    real_mediapipe_created = False
+    with detector_context as active_detector:
+        detector_constructed = True
+        real_mediapipe_created = bool(
+            not detector_test_double
+            and isinstance(active_detector, MediapipeDetectors)
+            and active_detector.real_mediapipe_created
+        )
     result = decode_logits(logits, bundle.labels, bundle.display_text)
     return {
         "integrity_verified": True,
-        "mediapipe_created": mediapipe_created,
+        "detector_constructed": detector_constructed,
+        "detector_test_double": detector_test_double,
+        "real_mediapipe_created": real_mediapipe_created,
+        "mediapipe_created": real_mediapipe_created,
         "preprocessing_shape": list(prepared.shape),
         "logit_shape": list(logits.shape),
         "top1": result.top1.label_id,
         "camera_opened": False,
         "device": str(device),
+        "component_id": trusted_release.component_id,
+        "model_version": trusted_release.model_version,
+        "software_contract_verified": True,
+        "accuracy_evidence": False,
     }
 
 
@@ -736,6 +1040,7 @@ def run_capture(
     input_mirror: bool = False,
     display_mirror: bool = False,
     expected_root_manifest_sha256: str,
+    startup_sink: Callable[[str], Any] = print,
 ) -> dict[str, Any]:
     import cv2
 
@@ -750,8 +1055,22 @@ def run_capture(
         expected_root_manifest_sha256=expected_root_manifest_sha256,
     )
     verify_auto_trigger_provenance(package_root, trusted_release=trusted_release)
-    trigger_config = load_formal_auto_trigger_config(package_root)
-    bundle = load_bundle(bundle_dir, device=device)
+    trigger_config = load_formal_auto_trigger_config(
+        package_root,
+        authenticated_bytes=authenticated_release_bytes(
+            trusted_release,
+            "auto_trigger_knee_ivcam_local.json",
+            description="formal auto-trigger config",
+        ),
+    )
+    trusted_labels = load_verified_labels(
+        package_root,
+        trusted_release=trusted_release,
+    )
+    load_golden_contract(
+        package_root / "golden_contract.json",
+        trusted_release=trusted_release,
+    )
     source = (
         open_video(
             video,
@@ -802,6 +1121,30 @@ def run_capture(
         cleanup_stack.__exit__(type(exc), exc, exc.__traceback__)
         raise
     try:
+        startup_sink(
+            serialize_startup_record(
+                build_startup_record(
+                    trusted_release,
+                    trigger_config,
+                    trusted_labels=trusted_labels,
+                    clock_policy=(
+                        "video_source_timestamps"
+                        if video is not None
+                        else "live_monotonic_perf_counter"
+                    ),
+                    current_clock_mode=source.clock_mode,
+                    rotation_requested=orientation.rotation,
+                    rotation_resolved=source_resolved_rotation,
+                    input_mirror=source_input_mirror,
+                    display_mirror=orientation.display_mirror,
+                )
+            )
+        )
+        bundle = load_bundle(
+            bundle_dir,
+            device=device,
+            trusted_release=trusted_release,
+        )
         if mode in {"auto", "manual"}:
             controller: AutoKnee42Controller | SlidingController = AutoKnee42Controller(
                 trigger_config,
@@ -917,11 +1260,13 @@ def run_capture(
                         resolved_rotation=source_resolved_rotation,
                         input_mirror=source_input_mirror,
                         display_mirror=orientation.display_mirror,
-                        trigger_config_sha256=sha256_canonical_text_file(
-                            package_root / "auto_trigger_knee_ivcam_local.json"
+                        trigger_config_sha256=_trusted_startup_hash(
+                            trusted_release,
+                            "auto_trigger_knee_ivcam_local.json",
                         ),
-                        trigger_provenance_sha256=sha256_canonical_text_file(
-                            package_root / "auto_trigger_provenance.json"
+                        trigger_provenance_sha256=_trusted_startup_hash(
+                            trusted_release,
+                            "auto_trigger_provenance.json",
                         ),
                         release_root_manifest_sha256=(
                             trusted_release.root_manifest_sha256
@@ -1142,6 +1487,11 @@ def _device_from_name(name: str) -> torch.device:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run hash-verified Knee42 RGB IVCAM/video inference.")
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"Knee42 app {APP_VERSION} (release {RELEASE_VERSION})",
+    )
     parser.add_argument("--bundle", required=True, type=Path)
     parser.add_argument(
         "--root-manifest-sha256",
@@ -1182,7 +1532,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
-    device = _device_from_name(args.device)
+    device = (
+        torch.device("cpu")
+        if args.self_test
+        else _device_from_name(args.device)
+    )
     if args.self_test:
         result = run_self_test(
             args.bundle,

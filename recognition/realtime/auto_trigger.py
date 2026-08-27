@@ -256,17 +256,36 @@ def load_auto_trigger_config(
     return AutoTriggerConfig(**values)
 
 
-def load_formal_auto_trigger_config(release_root: str | Path) -> AutoTriggerConfig:
+def load_formal_auto_trigger_config(
+    release_root: str | Path,
+    *,
+    authenticated_bytes: bytes | None = None,
+) -> AutoTriggerConfig:
     """Load the one release-root trigger config with an exact, complete schema."""
     config_path = Path(release_root) / FORMAL_AUTO_TRIGGER_CONFIG_NAME
-    if not config_path.is_file():
-        raise FileNotFoundError(f"formal auto-trigger config missing: {config_path}")
+    if authenticated_bytes is None:
+        if not config_path.is_file():
+            raise FileNotFoundError(f"formal auto-trigger config missing: {config_path}")
+        try:
+            raw_bytes = config_path.read_bytes()
+        except OSError as exc:
+            raise ValueError(
+                f"invalid formal auto-trigger config {config_path}: {exc}"
+            ) from exc
+    else:
+        raw_bytes = bytes(authenticated_bytes)
+    from recognition.realtime.knee42_integrity import (
+        IntegrityError,
+        parse_json_object_bytes,
+    )
+
     try:
-        payload = json.loads(config_path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        payload = parse_json_object_bytes(
+            raw_bytes,
+            description=f"formal auto-trigger config {config_path}",
+        )
+    except IntegrityError as exc:
         raise ValueError(f"invalid formal auto-trigger config {config_path}: {exc}") from exc
-    if not isinstance(payload, dict):
-        raise ValueError(f"formal auto-trigger config {config_path} must contain an object")
     required = {field.name for field in fields(AutoTriggerConfig)}
     missing = sorted(required - set(payload))
     unknown = sorted(set(payload) - required)

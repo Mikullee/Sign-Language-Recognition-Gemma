@@ -7,7 +7,7 @@ import json
 import tempfile
 import unittest
 from contextlib import redirect_stderr
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -42,6 +42,27 @@ from recognition.training.train_knee42_bigru import LABELS
 
 class UnsafeCheckpointPayload:
     pass
+
+
+STARTUP_FIXTURE_CONFIG_BYTES = b"fixture-authenticated-trigger-config"
+STARTUP_FIXTURE_HASHES = {
+    "requirements-windows-runtime.lock.txt": "1" * 64,
+    "golden_contract.json": "2" * 64,
+    "auto_trigger_knee_ivcam_local.json": hashlib.sha256(
+        STARTUP_FIXTURE_CONFIG_BYTES
+    ).hexdigest(),
+    "auto_trigger_provenance.json": "4" * 64,
+    "recognition/realtime/auto_trigger.py": "5" * 64,
+    "recognition/realtime/knee42_controllers.py": "6" * 64,
+    "model/component_manifest.json": "7" * 64,
+    "model/integrity_manifest.sha256": "8" * 64,
+    "model/best_model.pt": "9" * 64,
+    "model/runtime_config.json": "a" * 64,
+    "model/selection_ledger.json": "b" * 64,
+    "model/hand_landmarker.task": "c" * 64,
+    "model/pose_landmarker.task": "d" * 64,
+    "model/label_map_knee42.json": "e" * 64,
+}
 
 
 def sha256(path: Path) -> str:
@@ -104,22 +125,41 @@ def verified_trigger_release(
         "recognition/realtime/auto_trigger.py",
         "recognition/realtime/knee42_controllers.py",
     )
-    hashes = {
+    hashes = dict(STARTUP_FIXTURE_HASHES)
+    hashes.update({
         relative: sha256(root.joinpath(*relative.split("/")))
         for relative in paths
         if relative != omit
-    }
+    })
+    model_dir = root / "model"
+    if model_dir.is_dir():
+        hashes.update(
+            {
+                f"model/{path.name}": sha256(path)
+                for path in model_dir.iterdir()
+                if path.is_file()
+            }
+        )
+    component_hash = hashes.get("model/component_manifest.json", "d" * 64)
+    authenticated_files = {}
+    for relative in hashes:
+        path = root.joinpath(*relative.split("/"))
+        if path.is_file():
+            authenticated_files[relative] = path.read_bytes()
     return VerifiedRelease(
         root=root.resolve(),
         release_version="v1.0.1-v13.1",
         app_version="v13.1",
+        component_id="knee42-v11-runtime-fixture",
         model_version="v11",
+        model_component_manifest_sha256=component_hash,
         label_count=42,
         input_shape=(1, 64, 438),
         source_commit="a" * 40,
         dependency_lock_sha256="b" * 64,
         root_manifest_sha256=root_manifest_sha256,
         file_hashes=hashes,
+        authenticated_files=authenticated_files,
     )
 
 
@@ -211,6 +251,20 @@ def make_bundle(root: Path) -> Path:
     (bundle / "integrity_manifest.sha256").write_text(
         "".join(f"{sha256(bundle / name)}  {name}\n" for name in names),
         encoding="ascii",
+    )
+    payload_hashes = {name: sha256(bundle / name) for name in names}
+    write_json(
+        bundle / "component_manifest.json",
+        {
+            "schema_version": 1,
+            "component_id": "knee42-v11-runtime-fixture",
+            "model_version": "v11",
+            "label_count": 42,
+            "input_shape": [1, 64, 438],
+            "runtime_config_sha256": payload_hashes["runtime_config.json"],
+            "selection_ledger_sha256": payload_hashes["selection_ledger.json"],
+            "payload_sha256": payload_hashes,
+        },
     )
     return bundle
 
@@ -306,13 +360,20 @@ class RuntimeTests(unittest.TestCase):
                 root=release_root,
                 release_version="v1.0.1-v13.1",
                 app_version="v13.1",
+                component_id="knee42-v11-runtime-fixture",
                 model_version="v11",
+                model_component_manifest_sha256="d" * 64,
                 label_count=42,
                 input_shape=(1, 64, 438),
                 source_commit="a" * 40,
                 dependency_lock_sha256="b" * 64,
                 root_manifest_sha256=expected_root_manifest_sha256,
-                file_hashes={},
+                file_hashes=STARTUP_FIXTURE_HASHES,
+                authenticated_files={
+                    "auto_trigger_knee_ivcam_local.json": (
+                        STARTUP_FIXTURE_CONFIG_BYTES
+                    ),
+                },
             )
 
         self._verify_release_root = mock.patch.object(
@@ -322,6 +383,33 @@ class RuntimeTests(unittest.TestCase):
         )
         self._verify_release_root.start()
         self.addCleanup(self._verify_release_root.stop)
+        self._verified_labels = mock.patch.object(
+            knee42_ivcam,
+            "load_verified_labels",
+            return_value=list(LABELS),
+        )
+        self._verified_labels.start()
+        self.addCleanup(self._verified_labels.stop)
+        self._golden_contract = mock.patch.object(
+            knee42_ivcam,
+            "load_golden_contract",
+            return_value=SimpleNamespace(),
+        )
+        self._golden_contract.start()
+        self.addCleanup(self._golden_contract.stop)
+        self._golden_result = mock.patch.object(
+            knee42_ivcam,
+            "verify_golden_result",
+        )
+        self._golden_result.start()
+        self.addCleanup(self._golden_result.stop)
+        self._startup_record = mock.patch.object(
+            knee42_ivcam,
+            "build_startup_record",
+            return_value={"event": "fixture_startup"},
+        )
+        self._startup_record.start()
+        self.addCleanup(self._startup_record.stop)
 
     def test_bundle_rejects_non_weight_checkpoint_payload(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -348,7 +436,71 @@ class RuntimeTests(unittest.TestCase):
             )
 
             with self.assertRaisesRegex(IntegrityError, "Weights only load failed"):
-                load_bundle(bundle, device=torch.device("cpu"))
+                load_bundle(
+                    bundle,
+                    device=torch.device("cpu"),
+                    trusted_release=verified_trigger_release(bundle.parent),
+                )
+
+    def test_load_bundle_rejects_nonexact_or_coerced_label_map(self):
+        mutations = ("extra_field", "string_index", "missing_field")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            parent = Path(temp_dir)
+            for index, mutation in enumerate(mutations):
+                with self.subTest(mutation=mutation):
+                    bundle = make_bundle(parent / str(index))
+                    label_path = bundle / "label_map_knee42.json"
+                    label_payload = json.loads(label_path.read_text(encoding="utf-8"))
+                    if mutation == "extra_field":
+                        label_payload["unexpected"] = True
+                    elif mutation == "string_index":
+                        label_payload["label_to_idx"]["K42_01"] = "0"
+                    else:
+                        del label_payload["idx_to_label"]
+                    write_json(label_path, label_payload)
+
+                    ledger_path = bundle / "selection_ledger.json"
+                    ledger = json.loads(ledger_path.read_text(encoding="utf-8"))
+                    ledger["artifacts"]["label_map_knee42.json"] = sha256(label_path)
+                    write_json(ledger_path, ledger)
+
+                    internal_path = bundle / "integrity_manifest.sha256"
+                    names = [
+                        line.split(maxsplit=1)[1]
+                        for line in internal_path.read_text(encoding="ascii").splitlines()
+                    ]
+                    payload_hashes = {name: sha256(bundle / name) for name in names}
+                    internal_path.write_text(
+                        "".join(
+                            f"{payload_hashes[name]}  {name}\n" for name in names
+                        ),
+                        encoding="ascii",
+                    )
+                    component_path = bundle / "component_manifest.json"
+                    component = json.loads(component_path.read_text(encoding="utf-8"))
+                    component["payload_sha256"] = payload_hashes
+                    component["runtime_config_sha256"] = payload_hashes[
+                        "runtime_config.json"
+                    ]
+                    component["selection_ledger_sha256"] = payload_hashes[
+                        "selection_ledger.json"
+                    ]
+                    write_json(component_path, component)
+
+                    with mock.patch.object(
+                        knee42_ivcam.torch,
+                        "load",
+                        side_effect=AssertionError(
+                            "model deserialized before label rejection"
+                        ),
+                    ) as model_load:
+                        with self.assertRaisesRegex(IntegrityError, "label map"):
+                            load_bundle(
+                                bundle,
+                                device=torch.device("cpu"),
+                                trusted_release=verified_trigger_release(bundle.parent),
+                            )
+                    model_load.assert_not_called()
 
     def test_structured_display_data_keeps_e2_predictions_and_model_version(self):
         builder = getattr(knee42_ivcam, "build_display_panel_data", None)
@@ -780,19 +932,31 @@ class RuntimeTests(unittest.TestCase):
             root = Path(temp_dir)
             bundle_root = root / "model"
             bundle_root.mkdir()
-            (root / "auto_trigger_knee_ivcam_local.json").write_text("{}", encoding="utf-8")
-            (root / "auto_trigger_provenance.json").write_text("{}", encoding="utf-8")
-            expected_config_hash = knee42_ivcam.sha256_canonical_text_file(
+            write_trigger_runtime(root)
+            expected_config_hash = sha256(
                 root / "auto_trigger_knee_ivcam_local.json"
             )
-            expected_provenance_hash = knee42_ivcam.sha256_canonical_text_file(
+            expected_provenance_hash = sha256(
                 root / "auto_trigger_provenance.json"
             )
             bundle = FakeBundle(bundle_root)
 
+            def load_bundle_after_trigger_swap(*_args, **_kwargs):
+                (root / "auto_trigger_knee_ivcam_local.json").write_text(
+                    '{"tampered": true}', encoding="utf-8"
+                )
+                (root / "auto_trigger_provenance.json").write_text(
+                    '{"tampered": true}', encoding="utf-8"
+                )
+                return bundle
+
             with (
                 mock.patch.object(knee42_ivcam, "verify_auto_trigger_provenance"),
-                mock.patch.object(knee42_ivcam, "load_bundle", return_value=bundle),
+                mock.patch.object(
+                    knee42_ivcam,
+                    "load_bundle",
+                    side_effect=load_bundle_after_trigger_swap,
+                ),
                 mock.patch.object(knee42_ivcam, "open_video", return_value=packet_source),
                 mock.patch.object(knee42_ivcam, "load_formal_auto_trigger_config", return_value=object()),
                 mock.patch.object(knee42_ivcam, "AutoKnee42Controller", FakeAutoController),
@@ -1000,6 +1164,14 @@ class RuntimeTests(unittest.TestCase):
                 mock.patch.object(knee42_ivcam, "verify_auto_trigger_provenance"),
                 mock.patch.object(
                     knee42_ivcam,
+                    "authenticated_release_bytes",
+                    side_effect=IntegrityError(
+                        "formal auto-trigger config missing: "
+                        "auto_trigger_knee_ivcam_local.json"
+                    ),
+                ),
+                mock.patch.object(
+                    knee42_ivcam,
                     "load_bundle",
                     side_effect=AssertionError("bundle must not load"),
                 ) as load_bundle_mock,
@@ -1046,7 +1218,7 @@ class RuntimeTests(unittest.TestCase):
         patched_loader.assert_called_once_with(package_root)
 
     def test_source_is_released_when_controller_creation_fails_after_open(self):
-        source = SimpleNamespace(released=False)
+        source = SimpleNamespace(released=False, clock_mode="video_source_timestamp")
         source.release = lambda: setattr(source, "released", True)
 
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1087,7 +1259,7 @@ class RuntimeTests(unittest.TestCase):
         self.assertTrue(source.released)
 
     def test_source_and_window_are_cleaned_when_display_creation_fails(self):
-        source = SimpleNamespace(released=False)
+        source = SimpleNamespace(released=False, clock_mode="video_source_timestamp")
         source.release = lambda: setattr(source, "released", True)
 
         class FakeAutoController:
@@ -1164,7 +1336,11 @@ class RuntimeTests(unittest.TestCase):
 
         hand_context = HandContext()
         detectors = knee42_ivcam.MediapipeDetectors(
-            SimpleNamespace(root=Path("bundle")),
+            SimpleNamespace(
+                root=Path("bundle"),
+                hand_landmarker_task_bytes=b"fake-hand-model",
+                pose_landmarker_task_bytes=b"fake-pose-model",
+            ),
             pixels_mirrored=False,
         )
         with (
@@ -1183,6 +1359,56 @@ class RuntimeTests(unittest.TestCase):
                 detectors.__enter__()
 
         self.assertTrue(hand_context.closed)
+
+    def test_mediapipe_detectors_construct_from_authenticated_task_buffers(self):
+        from mediapipe.tasks.python.core import base_options
+        from mediapipe.tasks.python.vision.hand_landmarker import HandLandmarker
+        from mediapipe.tasks.python.vision.pose_landmarker import PoseLandmarker
+
+        class DetectorContext:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+        options = []
+
+        def capture_options(**kwargs):
+            options.append(kwargs)
+            return SimpleNamespace(**kwargs)
+
+        bundle = SimpleNamespace(
+            root=Path("must-not-be-read"),
+            hand_landmarker_task_bytes=b"authenticated-hand-task",
+            pose_landmarker_task_bytes=b"authenticated-pose-task",
+        )
+        with (
+            mock.patch.object(base_options, "BaseOptions", side_effect=capture_options),
+            mock.patch.object(
+                HandLandmarker,
+                "create_from_options",
+                return_value=DetectorContext(),
+            ),
+            mock.patch.object(
+                PoseLandmarker,
+                "create_from_options",
+                return_value=DetectorContext(),
+            ),
+        ):
+            with knee42_ivcam.MediapipeDetectors(
+                bundle,
+                pixels_mirrored=False,
+            ):
+                pass
+
+        self.assertEqual(
+            options,
+            [
+                {"model_asset_buffer": b"authenticated-hand-task"},
+                {"model_asset_buffer": b"authenticated-pose-task"},
+            ],
+        )
 
     def test_recorder_stop_failure_cannot_skip_other_runtime_cleanup(self):
         class PacketSource:
@@ -1526,8 +1752,17 @@ class RuntimeTests(unittest.TestCase):
             provenance["runtime_binding"]["auto_trigger_source_sha256"] = sha256(source)
             write_json(provenance_path, provenance)
 
-            with self.assertRaisesRegex(IntegrityError, "trusted release|manifest|provenance"):
-                verify_auto_trigger_provenance(root, trusted_release=trusted)
+            forged_snapshot = dict(trusted.authenticated_files)
+            forged_snapshot["recognition/realtime/auto_trigger.py"] = source.read_bytes()
+            forged_snapshot["auto_trigger_provenance.json"] = provenance_path.read_bytes()
+            with self.assertRaisesRegex(IntegrityError, "trusted release|SHA-256|provenance"):
+                verify_auto_trigger_provenance(
+                    root,
+                    trusted_release=replace(
+                        trusted,
+                        authenticated_files=forged_snapshot,
+                    ),
+                )
 
             missing = verified_trigger_release(
                 root,
@@ -1592,9 +1827,56 @@ class RuntimeTests(unittest.TestCase):
             trusted = verified_trigger_release(root)
             verify_auto_trigger_provenance(root, trusted_release=trusted)
             source.write_text("tampered", encoding="utf-8")
-
+            tampered = dict(trusted.authenticated_files)
+            tampered["recognition/realtime/auto_trigger.py"] = source.read_bytes()
             with self.assertRaisesRegex(IntegrityError, "auto_trigger.py"):
-                verify_auto_trigger_provenance(root, trusted_release=trusted)
+                verify_auto_trigger_provenance(
+                    root,
+                    trusted_release=replace(
+                        trusted,
+                        authenticated_files=tampered,
+                    ),
+                )
+
+    def test_trigger_provenance_uses_one_root_authenticated_snapshot(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            write_trigger_runtime(root)
+            trusted = verified_trigger_release(root)
+            for relative in (
+                "auto_trigger_provenance.json",
+                "auto_trigger_knee_ivcam_local.json",
+                "recognition/realtime/auto_trigger.py",
+                "recognition/realtime/knee42_controllers.py",
+            ):
+                root.joinpath(*relative.split("/")).write_bytes(
+                    b"SWAPPED-AFTER-ROOT-VERIFICATION"
+                )
+
+            provenance = verify_auto_trigger_provenance(
+                root,
+                trusted_release=trusted,
+            )
+
+        self.assertEqual(provenance["schema_version"], 2)
+
+    def test_formal_trigger_config_parses_authenticated_bytes_without_reopen(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            write_trigger_runtime(root)
+            trusted = verified_trigger_release(root)
+            raw_bytes = trusted.authenticated_files[
+                "auto_trigger_knee_ivcam_local.json"
+            ]
+            (root / "auto_trigger_knee_ivcam_local.json").write_bytes(b"{}")
+
+            config = knee42_ivcam.load_formal_auto_trigger_config(
+                root,
+                authenticated_bytes=raw_bytes,
+            )
+
+        self.assertEqual(config.start_motion_threshold, 0.015)
+        self.assertEqual(config.blank_motion_threshold, 0.022)
 
     def test_auto_trigger_provenance_rejects_controller_tampering(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1604,9 +1886,18 @@ class RuntimeTests(unittest.TestCase):
             verify_auto_trigger_provenance(root, trusted_release=trusted)
             controller = root / "recognition" / "realtime" / "knee42_controllers.py"
             controller.write_text("tampered", encoding="utf-8")
-
+            tampered = dict(trusted.authenticated_files)
+            tampered[
+                "recognition/realtime/knee42_controllers.py"
+            ] = controller.read_bytes()
             with self.assertRaisesRegex(IntegrityError, "knee42_controllers.py"):
-                verify_auto_trigger_provenance(root, trusted_release=trusted)
+                verify_auto_trigger_provenance(
+                    root,
+                    trusted_release=replace(
+                        trusted,
+                        authenticated_files=tampered,
+                    ),
+                )
 
     def test_tampered_standardizer_fails_before_model_load(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1615,7 +1906,11 @@ class RuntimeTests(unittest.TestCase):
 
             with mock.patch("recognition.realtime.knee42_ivcam.torch.load") as load:
                 with self.assertRaisesRegex(IntegrityError, "standardizer_train_only"):
-                    load_bundle(bundle, device=torch.device("cpu"))
+                    load_bundle(
+                        bundle,
+                        device=torch.device("cpu"),
+                        trusted_release=verified_trigger_release(bundle.parent),
+                    )
 
             load.assert_not_called()
 
@@ -1623,7 +1918,11 @@ class RuntimeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             bundle_path = make_bundle(Path(temp_dir))
 
-            bundle = load_bundle(bundle_path, device=torch.device("cpu"))
+            bundle = load_bundle(
+                bundle_path,
+                device=torch.device("cpu"),
+                trusted_release=verified_trigger_release(bundle_path.parent),
+            )
             result = bundle.predict(
                 np.zeros((5, 219), dtype=np.float32),
                 np.ones((5, 219), dtype=np.bool_),
@@ -1831,6 +2130,10 @@ class RuntimeTests(unittest.TestCase):
             self.assertEqual(result["preprocessing_shape"], [64, 438])
             self.assertFalse(result["camera_opened"])
             self.assertTrue(result["integrity_verified"])
+            self.assertTrue(result["detector_constructed"])
+            self.assertTrue(result["detector_test_double"])
+            self.assertFalse(result["real_mediapipe_created"])
+            self.assertFalse(result["mediapipe_created"])
             self.assertEqual(FakeDetectorContext.entered, 1)
             self.assertEqual(detector_policies, [False])
 

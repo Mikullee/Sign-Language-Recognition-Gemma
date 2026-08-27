@@ -9,7 +9,7 @@
     "temporal_model_sha256": "e2bec48438f8085dd4f8207c13376afe50384b9f0a2e081939278922cf81bad8"
   },
   "runtime_binding": {
-    "auto_trigger_source_sha256": "290529258419ccb37d63041eb02cf5efd4f419ac15c812f73b3a9ccc48dc53df",
+    "auto_trigger_source_sha256": "69321214f2797a7ea5b93c811e6ebbf214c18ce4a79f033f1340c8e9bb9e6e07",
     "auto_trigger_controller_sha256": "5244e239236cc59924ff99b138dcaf569b2b7df38abe60dbb189d0af716cc130",
     "auto_trigger_config_sha256": "34ac8a34e0ddf59642e3fa35bb3ab6ec092fd5c4c6dcbc9dde17dc578d7db5fa"
   },

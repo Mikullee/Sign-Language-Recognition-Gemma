@@ -1,0 +1,1 @@
+{"features_final": "knee42_features_upright_v2", "horizontal_mirror": false, "input_dim": 438, "knee_indices_removed": [25, 26], "mask_concatenated": true, "sequence_length": 64, "standardizer": "observed_train_standardizer", "video_orientation": "container_rotation_metadata_applied_explicitly"}

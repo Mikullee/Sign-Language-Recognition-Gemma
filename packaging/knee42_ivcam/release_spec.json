@@ -2,7 +2,8 @@
   "schema_version": 1,
   "release_version": "v1.0.1-v13.1",
   "app_version": "v13.1",
-  "model_version": "v11",
+  "default_model_version": "v11",
+  "component_manifest_name": "component_manifest.json",
   "label_count": 42,
   "input_shape": [
     1,
@@ -53,8 +54,22 @@
       "auto_trigger_knee_ivcam_local.json",
       "auto_trigger_provenance.json",
       "golden_contract.json",
+      "recognition/__init__.py",
+      "recognition/inference/__init__.py",
+      "recognition/inference/daily30_sentence_model_utils.py",
+      "recognition/realtime/__init__.py",
       "recognition/realtime/auto_trigger.py",
+      "recognition/realtime/knee42_capture.py",
+      "recognition/realtime/knee42_clock.py",
       "recognition/realtime/knee42_controllers.py",
+      "recognition/realtime/knee42_display.py",
+      "recognition/realtime/knee42_golden.py",
+      "recognition/realtime/knee42_integrity.py",
+      "recognition/realtime/knee42_ivcam.py",
+      "recognition/realtime/knee42_orientation.py",
+      "recognition/realtime/knee42_preprocessing.py",
+      "recognition/realtime/knee42_session_recording.py",
+      "recognition/realtime/probability_reporting.py",
       "packaging/knee42_ivcam/release_spec.json"
     ],
     "model": [
@@ -67,6 +82,7 @@
       "selection_ledger.json",
       "hand_landmarker.task",
       "pose_landmarker.task",
+      "component_manifest.json",
       "integrity_manifest.sha256"
     ]
   },
