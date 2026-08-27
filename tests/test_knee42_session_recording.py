@@ -12,7 +12,11 @@ import cv2
 import numpy as np
 import recognition.realtime.knee42_session_recording as session_recording
 
-from recognition.realtime.knee42_controllers import SegmentEvidence
+from recognition.realtime.auto_trigger import CalibrationState, CalibrationTelemetry
+from recognition.realtime.knee42_controllers import (
+    BoundaryDecisionTelemetry,
+    SegmentEvidence,
+)
 from recognition.realtime.knee42_session_recording import SegmentSessionRecorder, frame_bounds
 
 
@@ -45,6 +49,174 @@ class FrameBoundsTests(unittest.TestCase):
 
 
 class SegmentSessionRecorderTests(unittest.TestCase):
+    def test_stop_summary_write_failure_is_retryable_and_never_publishes_success(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            recorder = SegmentSessionRecorder(
+                Path(temp_dir),
+                fps=30.0,
+                frame_size=(32, 24),
+                source_origin_sec=0.0,
+                now=lambda: "retry-summary",
+            )
+            real_write_text = Path.write_text
+            failed = False
+
+            def fail_summary_once(path, data, *args, **kwargs):
+                nonlocal failed
+                if not failed and path.name in {
+                    "session_summary.json",
+                    "session_summary.json.tmp",
+                }:
+                    failed = True
+                    raise OSError("summary write failed")
+                return real_write_text(path, data, *args, **kwargs)
+
+            with mock.patch.object(
+                Path,
+                "write_text",
+                autospec=True,
+                side_effect=fail_summary_once,
+            ):
+                with self.assertRaisesRegex(OSError, "summary write failed"):
+                    recorder.stop()
+
+            self.assertIsNone(recorder._summary)
+            self.assertFalse((recorder.session_dir / "session_summary.json").exists())
+            self.assertEqual(list(recorder.session_dir.glob("*.tmp")), [])
+
+            summary = recorder.stop()
+
+            self.assertIs(recorder.stop(), summary)
+            self.assertTrue((recorder.session_dir / "session_summary.json").is_file())
+
+    def test_boundary_nonfinite_json_fails_before_any_boundary_is_persisted(self):
+        decision = BoundaryDecisionTelemetry(
+            state_before="END_CONFIRM",
+            state_after="FORCED_FINALIZE_COOLDOWN",
+            clip_start_sec=0.0,
+            clip_end_sec=0.0,
+            finalize_sec=0.1,
+            finalize_reason="visible_rest_finalize",
+            decision_reason="short_segment",
+            rest_detected_sec=0.0,
+            boundary_policy="first_confirmed_rest",
+            threshold_snapshot={"min_segment_sec": float("nan")},
+            calibration=CalibrationTelemetry(
+                CalibrationState.DISABLED,
+                None,
+                0.0,
+                0,
+            ),
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            recorder = SegmentSessionRecorder(
+                Path(temp_dir),
+                fps=30.0,
+                frame_size=(32, 24),
+                source_origin_sec=0.0,
+                context_sec=0.0,
+                now=lambda: "strict-boundary-json",
+            )
+            try:
+                recorder.add_frame(
+                    np.zeros((24, 32, 3), dtype=np.uint8), timestamp_sec=0.0
+                )
+                with self.assertRaisesRegex(ValueError, "JSON|compliant|finite"):
+                    recorder.record_boundary_decision(decision, result=None)
+
+                self.assertEqual(recorder.segment_count, 0)
+                self.assertEqual(list((recorder.session_dir / "metadata").iterdir()), [])
+                self.assertEqual(
+                    (recorder.session_dir / "segments.jsonl").read_text(
+                        encoding="utf-8"
+                    ),
+                    "",
+                )
+            finally:
+                recorder.stop()
+
+    def test_short_boundary_decision_is_persisted_without_prediction(self):
+        context = session_recording.RecordingRuntimeContext(
+            clock_mode="video_source_timestamp",
+            resolved_rotation=0,
+            input_mirror=False,
+            display_mirror=False,
+            trigger_config_sha256="1" * 64,
+            trigger_provenance_sha256="2" * 64,
+        )
+        decision = BoundaryDecisionTelemetry(
+            state_before="END_CONFIRM",
+            state_after="FORCED_FINALIZE_COOLDOWN",
+            clip_start_sec=0.0,
+            clip_end_sec=0.0,
+            finalize_sec=0.2,
+            finalize_reason="visible_rest_finalize",
+            decision_reason="short_segment",
+            rest_detected_sec=0.0,
+            boundary_policy="first_confirmed_rest",
+            threshold_snapshot={"min_segment_sec": 0.8},
+            calibration=CalibrationTelemetry(
+                CalibrationState.DISABLED,
+                None,
+                0.0,
+                0,
+            ),
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            recorder = SegmentSessionRecorder(
+                Path(temp_dir),
+                fps=30.0,
+                frame_size=(32, 24),
+                source_origin_sec=0.0,
+                runtime_context=context,
+                context_sec=0.0,
+                now=lambda: "short-boundary",
+            )
+            try:
+                recorder.add_frame(
+                    np.zeros((24, 32, 3), dtype=np.uint8), timestamp_sec=0.0
+                )
+                recorder.record_boundary_decision(decision, result=None)
+                summary = recorder.stop()
+            finally:
+                recorder.stop()
+            payload = json.loads(
+                (summary.session_dir / "metadata" / "segment_0001.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+        self.assertIsNone(payload["top1"])
+        self.assertEqual(payload["top3"], [])
+        self.assertEqual(payload["boundary_decision"]["decision_reason"], "short_segment")
+        self.assertEqual(payload["runtime_context"], context.to_dict())
+
+    def test_runtime_context_is_immutable_and_written_to_session_summary(self):
+        context_type = getattr(session_recording, "RecordingRuntimeContext", None)
+        self.assertIsNotNone(context_type, "recording runtime context API is missing")
+        context = context_type(
+            clock_mode="video_source_timestamp",
+            resolved_rotation=90,
+            input_mirror=True,
+            display_mirror=False,
+            trigger_config_sha256="1" * 64,
+            trigger_provenance_sha256="2" * 64,
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            recorder = SegmentSessionRecorder(
+                Path(temp_dir),
+                fps=30.0,
+                frame_size=(32, 24),
+                source_origin_sec=0.0,
+                runtime_context=context,
+                now=lambda: "runtime-context",
+            )
+            summary = recorder.stop()
+            payload = json.loads(
+                (summary.session_dir / "session_summary.json").read_text(encoding="utf-8")
+            )
+        self.assertEqual(payload["runtime_context"]["clock_mode"], "video_source_timestamp")
+        self.assertEqual(payload["runtime_context"]["trigger_config_sha256"], "1" * 64)
+
     def test_recorder_rejects_nonfinite_or_impractical_source_fps_before_writer(self):
         fake_cv2 = mock.Mock()
         fake_cv2.VideoWriter.side_effect = AssertionError("writer must not be opened")

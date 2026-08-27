@@ -15,9 +15,7 @@ import numpy as np
 import torch
 
 from recognition.inference.daily30_sentence_model_utils import BiGRUSentenceClassifier
-from recognition.realtime.auto_trigger import load_auto_trigger_config
 from recognition.realtime.knee42_capture import open_camera, open_video
-from recognition.realtime.knee42_controllers import AutoKnee42Controller, SlidingController
 from recognition.realtime.knee42_display import (
     DisplayPanelData,
     DisplayPrediction,
@@ -27,8 +25,10 @@ from recognition.realtime.knee42_display import (
 )
 from recognition.realtime.knee42_integrity import (
     IntegrityError,
+    VerifiedRelease,
     parse_sha256_manifest,
     sha256_file,
+    verify_release_root,
 )
 from recognition.realtime.knee42_orientation import (
     InputOrientation,
@@ -37,7 +37,10 @@ from recognition.realtime.knee42_orientation import (
     parse_rotation,
     resolve_rotation,
 )
-from recognition.realtime.knee42_session_recording import SegmentSessionRecorder
+from recognition.realtime.knee42_session_recording import (
+    RecordingRuntimeContext,
+    SegmentSessionRecorder,
+)
 from recognition.realtime.knee42_preprocessing import (
     FrameObservation,
     LANDMARK_DIM,
@@ -54,6 +57,45 @@ from recognition.realtime.probability_reporting import (
 
 
 LABELS = [f"K42_{number:02d}" for number in range(1, 43)]
+
+
+def load_auto_trigger_config(*args, **kwargs):
+    """Legacy patch seam backed by the strict formal loader after verification."""
+    from recognition.realtime.auto_trigger import (
+        load_formal_auto_trigger_config as runtime_loader,
+    )
+
+    return runtime_loader(*args, **kwargs)
+
+
+def load_formal_auto_trigger_config(*args, **kwargs):
+    """Strict loader seam; delegates so legacy dependency patches still apply."""
+    return load_auto_trigger_config(*args, **kwargs)
+
+
+class _LazyTriggerRuntimeType(type):
+    """Class-compatible dependency seam without importing trigger code at startup."""
+
+    runtime_name: str
+
+    def _runtime_type(cls):
+        from recognition.realtime import knee42_controllers
+
+        return getattr(knee42_controllers, cls.runtime_name)
+
+    def __call__(cls, *args, **kwargs):
+        return cls._runtime_type()(*args, **kwargs)
+
+    def __instancecheck__(cls, instance):
+        return isinstance(instance, cls._runtime_type())
+
+
+class AutoKnee42Controller(metaclass=_LazyTriggerRuntimeType):
+    runtime_name = "AutoKnee42Controller"
+
+
+class SlidingController(metaclass=_LazyTriggerRuntimeType):
+    runtime_name = "SlidingController"
 
 
 REQUIRED_INTEGRITY_FILES = frozenset(
@@ -107,10 +149,56 @@ def verify_integrity_manifest(bundle_dir: Path) -> dict[str, str]:
     return expected
 
 
-def verify_auto_trigger_provenance(package_root: Path) -> dict[str, Any]:
-    """Bind runtime trigger source and config to the supplied archived hashes."""
+def verify_auto_trigger_provenance(
+    package_root: Path,
+    *,
+    trusted_release: VerifiedRelease,
+) -> dict[str, Any]:
+    """Verify local runtime binding; the release manifest remains the trust root."""
     package_root = Path(package_root).resolve()
+    if not isinstance(trusted_release, VerifiedRelease):
+        raise IntegrityError("trusted release must be a VerifiedRelease")
+    if trusted_release.root.resolve() != package_root:
+        raise IntegrityError(
+            "trusted release root mismatch: "
+            f"expected {package_root}, got {trusted_release.root.resolve()}"
+        )
+    trusted_paths = (
+        "auto_trigger_provenance.json",
+        "auto_trigger_knee_ivcam_local.json",
+        "recognition/realtime/auto_trigger.py",
+        "recognition/realtime/knee42_controllers.py",
+    )
+    for relative in trusted_paths:
+        declared = trusted_release.file_hashes.get(relative)
+        if declared is None:
+            raise IntegrityError(
+                f"trusted release manifest missing runtime path: {relative}"
+            )
+        path = package_root.joinpath(*relative.split("/"))
+        if not path.is_file():
+            raise IntegrityError(f"trusted release runtime file missing: {relative}")
+        actual_raw = sha256_file(path)
+        if actual_raw != declared:
+            raise IntegrityError(
+                f"trusted release manifest SHA-256 mismatch for {relative}: "
+                f"expected {declared}, actual {actual_raw}"
+            )
     provenance = _read_json(package_root / "auto_trigger_provenance.json")
+    if not isinstance(provenance, dict):
+        raise IntegrityError("auto-trigger provenance must contain a JSON object")
+    if type(provenance.get("schema_version")) is not int or provenance["schema_version"] != 2:
+        raise IntegrityError("auto-trigger provenance schema_version must be exactly 2")
+    archived = provenance.get("archived_upstream")
+    runtime_binding = provenance.get("runtime_binding")
+    if not isinstance(archived, dict):
+        raise IntegrityError("auto-trigger provenance archived_upstream must be an object")
+    if not isinstance(runtime_binding, dict):
+        raise IntegrityError("auto-trigger provenance runtime_binding must be an object")
+    if provenance.get("trusted_root_binding") != "release_manifest_required":
+        raise IntegrityError(
+            "auto-trigger provenance trusted_root_binding must require the release manifest"
+        )
     source = package_root / "recognition" / "realtime" / "auto_trigger.py"
     config = package_root / "auto_trigger_knee_ivcam_local.json"
     checks = (
@@ -125,9 +213,10 @@ def verify_auto_trigger_provenance(package_root: Path) -> dict[str, Any]:
     for description, path, key in checks:
         if not path.is_file():
             raise IntegrityError(f"{description} missing: {path}")
-        wanted = str(provenance.get(key, "")).lower()
+        wanted_value = runtime_binding.get(key)
+        wanted = wanted_value if isinstance(wanted_value, str) else ""
         actual = sha256_canonical_text_file(path)
-        if len(wanted) != 64 or actual != wanted:
+        if len(wanted) != 64 or wanted.lower() != wanted or actual != wanted:
             raise IntegrityError(
                 f"{description} SHA-256 mismatch: expected {wanted}, actual {actual}"
             )
@@ -386,9 +475,28 @@ def build_display_panel_data(
     )
 
 
-def auto_display_state(state: str, *, calibrated: bool) -> str:
+def auto_display_state(
+    state: str,
+    *,
+    calibrated: bool | None = None,
+    calibration: Any | None = None,
+) -> str:
+    if calibration is not None:
+        calibrated = bool(calibration.calibrated)
     if state == "IDLE_BLANK":
-        return "WAITING" if calibrated else "CALIBRATING"
+        if calibrated:
+            return "WAITING"
+        if calibration is None:
+            return "CALIBRATING"
+        blocker = calibration.blocker
+        blocker_text = (
+            calibration.status.value if blocker is None else blocker.value
+        )
+        return (
+            f"CALIBRATING {blocker_text} "
+            f"elapsed={calibration.elapsed_sec:.3f}s "
+            f"samples={calibration.sample_count}"
+        )
     return {
         "SIGNING_ACTIVE": "SIGNING",
         "END_CONFIRM": "END_CONFIRM",
@@ -480,9 +588,16 @@ def run_self_test(
     bundle_dir: Path,
     *,
     device: torch.device,
+    expected_root_manifest_sha256: str,
     detector_factory: Callable[..., Any] = create_mediapipe_detectors,
 ) -> dict[str, Any]:
-    verify_auto_trigger_provenance(Path(bundle_dir).resolve().parent)
+    package_root = Path(bundle_dir).resolve().parent
+    trusted_release = verify_release_root(
+        package_root,
+        expected_root_manifest_sha256=expected_root_manifest_sha256,
+    )
+    verify_auto_trigger_provenance(package_root, trusted_release=trusted_release)
+    load_formal_auto_trigger_config(package_root)
     bundle = load_bundle(bundle_dir, device=device)
     with detector_factory(bundle, pixels_mirrored=False):
         mediapipe_created = True
@@ -620,6 +735,7 @@ def run_capture(
     rotation: RotationSetting = "auto",
     input_mirror: bool = False,
     display_mirror: bool = False,
+    expected_root_manifest_sha256: str,
 ) -> dict[str, Any]:
     import cv2
 
@@ -628,7 +744,13 @@ def run_capture(
         input_mirror=input_mirror,
         display_mirror=display_mirror,
     )
-    verify_auto_trigger_provenance(Path(bundle_dir).resolve().parent)
+    package_root = Path(bundle_dir).resolve().parent
+    trusted_release = verify_release_root(
+        package_root,
+        expected_root_manifest_sha256=expected_root_manifest_sha256,
+    )
+    verify_auto_trigger_provenance(package_root, trusted_release=trusted_release)
+    trigger_config = load_formal_auto_trigger_config(package_root)
     bundle = load_bundle(bundle_dir, device=device)
     source = (
         open_video(
@@ -681,11 +803,8 @@ def run_capture(
         raise
     try:
         if mode in {"auto", "manual"}:
-            trigger_config_path = bundle.root.parent / "auto_trigger_knee_ivcam_local.json"
-            if not trigger_config_path.is_file():
-                raise IntegrityError(f"auto-trigger config missing: {trigger_config_path}")
             controller: AutoKnee42Controller | SlidingController = AutoKnee42Controller(
-                load_auto_trigger_config(trigger_config_path),
+                trigger_config,
                 initial_mode=mode,
             )
         else:
@@ -713,6 +832,7 @@ def run_capture(
     recorder: SegmentSessionRecorder | None = None
     recording_requested = bool(start_logging)
     last_recording_summary = None
+    boundary_decisions: list[dict[str, Any]] = []
     latest_display_pose: np.ndarray | None = None
     latest_display_left_hand: np.ndarray | None = None
     latest_display_right_hand: np.ndarray | None = None
@@ -749,18 +869,19 @@ def run_capture(
 
     cleanup_stack.push(stop_recording_on_exit)
 
-    def save_auto_result(event, result: InferenceResult) -> None:
-        if recorder is not None and event.segment is not None:
-            recorder.record_segment(event.segment, result)
-
     def handle_controller_event(event) -> None:
         nonlocal last_result
-        if not event.infer:
-            return
-        last_result = _predict_features(bundle, event.features)
-        save_auto_result(event, last_result)
-        if isinstance(controller, AutoKnee42Controller) and controller.mode == "manual":
-            controller.mark_result()
+        event_result: InferenceResult | None = None
+        if event.infer:
+            event_result = _predict_features(bundle, event.features)
+            last_result = event_result
+            if isinstance(controller, AutoKnee42Controller) and controller.mode == "manual":
+                controller.mark_result()
+        decision = getattr(event, "boundary_decision", None)
+        if decision is not None:
+            boundary_decisions.append(decision.to_dict())
+            if recorder is not None:
+                recorder.record_boundary_decision(decision, event_result)
 
     def flush_pending_auto_observation():
         pending = held_batch.take()
@@ -791,11 +912,27 @@ def run_capture(
                 last_frame_timestamp_sec = packet.timestamp_sec
                 source_fps = source.fps if source.fps > 0 else 30.0
                 if recording_requested and recorder is None:
+                    runtime_context = RecordingRuntimeContext(
+                        clock_mode=source.clock_mode,
+                        resolved_rotation=source_resolved_rotation,
+                        input_mirror=source_input_mirror,
+                        display_mirror=orientation.display_mirror,
+                        trigger_config_sha256=sha256_canonical_text_file(
+                            package_root / "auto_trigger_knee_ivcam_local.json"
+                        ),
+                        trigger_provenance_sha256=sha256_canonical_text_file(
+                            package_root / "auto_trigger_provenance.json"
+                        ),
+                        release_root_manifest_sha256=(
+                            trusted_release.root_manifest_sha256
+                        ),
+                    )
                     recorder = SegmentSessionRecorder(
                         recordings_dir,
                         fps=source_fps,
                         frame_size=(int(frame.shape[1]), int(frame.shape[0])),
                         source_origin_sec=packet.timestamp_sec,
+                        runtime_context=runtime_context,
                     )
                 if recorder is not None:
                     recorder.add_frame(frame, timestamp_sec=packet.timestamp_sec)
@@ -853,7 +990,15 @@ def run_capture(
                         display_state = (
                             "RESULT"
                             if last_result is not None and controller.state == "FORCED_FINALIZE_COOLDOWN"
-                            else auto_display_state(controller.state, calibrated=controller.calibrated)
+                            else auto_display_state(
+                                controller.state,
+                                calibrated=controller.calibrated,
+                                calibration=getattr(
+                                    controller,
+                                    "calibration_telemetry",
+                                    None,
+                                ),
+                            )
                         )
                     (
                         display_frame,
@@ -935,9 +1080,7 @@ def run_capture(
                 and controller.mode == "auto"
             ):
                 event = controller.finalize_video_eof()
-                if event.infer:
-                    last_result = _predict_features(bundle, event.features)
-                    save_auto_result(event, last_result)
+                handle_controller_event(event)
             if headless and isinstance(controller, AutoKnee42Controller) and controller.mode == "manual" and controller.state == "recording":
                 event = controller.on_space()
                 if event.infer:
@@ -950,7 +1093,7 @@ def run_capture(
     else:
         held_batch.clear()
         cleanup_stack.close()
-    if last_result is None:
+    if last_result is None and not boundary_decisions:
         mode_name = controller.mode if isinstance(controller, AutoKnee42Controller) else "sliding"
         state_name = controller.state
         calibrated = (
@@ -972,10 +1115,14 @@ def run_capture(
         "feature_frames": feature_frames,
         "first_frame_timestamp_sec": first_frame_timestamp_sec,
         "last_frame_timestamp_sec": last_frame_timestamp_sec,
-        "top1": last_result.top1.label_id,
-        "top1_raw_probability": last_result.top1.raw_probability,
-        "top3": [item.label_id for item in last_result.top3],
+        "inference_performed": last_result is not None,
+        "top1": None if last_result is None else last_result.top1.label_id,
+        "top1_raw_probability": (
+            None if last_result is None else last_result.top1.raw_probability
+        ),
+        "top3": [] if last_result is None else [item.label_id for item in last_result.top3],
         "probability_policy": probability_policy_record(),
+        "boundary_decisions": boundary_decisions,
         "device": str(device),
     }
     if last_recording_summary is not None:
@@ -996,6 +1143,11 @@ def _device_from_name(name: str) -> torch.device:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run hash-verified Knee42 RGB IVCAM/video inference.")
     parser.add_argument("--bundle", required=True, type=Path)
+    parser.add_argument(
+        "--root-manifest-sha256",
+        required=True,
+        help="caller-trusted lowercase SHA-256 of integrity_manifest.sha256",
+    )
     parser.add_argument("--mode", choices=("auto", "manual", "sliding"), default="auto")
     parser.add_argument("--camera-index", type=int)
     parser.add_argument("--max-camera-index", type=int, default=9)
@@ -1032,7 +1184,11 @@ def main(argv: Sequence[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
     device = _device_from_name(args.device)
     if args.self_test:
-        result = run_self_test(args.bundle, device=device)
+        result = run_self_test(
+            args.bundle,
+            device=device,
+            expected_root_manifest_sha256=args.root_manifest_sha256,
+        )
     else:
         result = run_capture(
             args.bundle,
@@ -1049,6 +1205,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             rotation=parse_rotation(args.rotation),
             input_mirror=MirrorMode.parse(args.input_mirror).enabled,
             display_mirror=MirrorMode.parse(args.display_mirror).enabled,
+            expected_root_manifest_sha256=args.root_manifest_sha256,
         )
     print(json.dumps(result, ensure_ascii=False, indent=2))
 

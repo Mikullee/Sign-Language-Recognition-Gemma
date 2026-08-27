@@ -18,7 +18,7 @@ COMMIT_PATTERN = re.compile(r"[0-9a-f]{40}")
 LICENSE_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9.+-]*")
 MANIFEST_LINE_PATTERN = re.compile(r"([0-9A-Fa-f]{64})[ \t]+(\*?)(.+)")
 CANONICAL_RELEASE_SPEC_SHA256 = (
-    "d6a9a3d9e9e6eb8932f7b3012b762a41b62be43ced2acb83edee9de9876c122b"
+    "1b56eeef76641f0d40604217ade8804c87ea9a901b0ca95514479a9a4fd53f6e"
 )
 DEFAULT_RELEASE_SPEC_PATH = (
     Path(__file__).resolve().parents[2]
@@ -31,6 +31,10 @@ VERIFIER_REQUIRED_RELEASE_PATHS = frozenset(
         "VERSION_MANIFEST.json",
         "requirements-windows-runtime.lock.txt",
         "packaging/knee42_ivcam/release_spec.json",
+        "auto_trigger_knee_ivcam_local.json",
+        "auto_trigger_provenance.json",
+        "recognition/realtime/auto_trigger.py",
+        "recognition/realtime/knee42_controllers.py",
     }
 )
 

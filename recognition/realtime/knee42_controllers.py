@@ -3,7 +3,8 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass
-from typing import Any, Callable, Sequence
+from types import MappingProxyType
+from typing import Any, Callable, Mapping, Sequence
 
 import numpy as np
 
@@ -11,6 +12,7 @@ from recognition.realtime.auto_trigger import (
     AutoFrameAnalysis,
     AutoTriggerConfig,
     AutoTriggerEngine,
+    CalibrationTelemetry,
     analyze_frame_vector,
 )
 from recognition.realtime.knee42_clock import MAX_PRACTICAL_FPS
@@ -34,12 +36,50 @@ class SegmentEvidence:
 
 
 @dataclass(frozen=True)
+class BoundaryDecisionTelemetry:
+    state_before: str
+    state_after: str
+    clip_start_sec: float
+    clip_end_sec: float
+    finalize_sec: float
+    finalize_reason: str
+    decision_reason: str
+    rest_detected_sec: float | None
+    boundary_policy: str
+    threshold_snapshot: Mapping[str, float | bool]
+    calibration: CalibrationTelemetry
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "threshold_snapshot",
+            MappingProxyType(dict(self.threshold_snapshot)),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "state_before": self.state_before,
+            "state_after": self.state_after,
+            "clip_start_sec": self.clip_start_sec,
+            "clip_end_sec": self.clip_end_sec,
+            "finalize_sec": self.finalize_sec,
+            "finalize_reason": self.finalize_reason,
+            "decision_reason": self.decision_reason,
+            "rest_detected_sec": self.rest_detected_sec,
+            "boundary_policy": self.boundary_policy,
+            "threshold_snapshot": dict(self.threshold_snapshot),
+            "calibration": self.calibration.to_dict(),
+        }
+
+
+@dataclass(frozen=True)
 class ControllerEvent:
     state: str
     infer: bool = False
     features: tuple[Any, ...] = ()
     message: str = ""
     segment: SegmentEvidence | None = None
+    boundary_decision: BoundaryDecisionTelemetry | None = None
 
 
 class ManualController:
@@ -178,10 +218,11 @@ class AutoKnee42Controller:
 
     @property
     def calibrated(self) -> bool:
-        return bool(
-            not self.config.reference_rest_enabled
-            or self.engine._rest_reference_signature is not None
-        )
+        return self.calibration_telemetry.calibrated
+
+    @property
+    def calibration_telemetry(self) -> CalibrationTelemetry:
+        return self.engine.calibration_telemetry
 
     def add_observation(
         self,
@@ -229,8 +270,25 @@ class AutoKnee42Controller:
             self._last_rest_feature = feature
         if segment is None:
             return ControllerEvent(self.state)
+        evidence = SegmentEvidence(
+            clip_start_sec=segment.clip_start_sec,
+            clip_end_sec=segment.clip_end_sec,
+            finalize_sec=segment.finalize_sec,
+            reason=segment.reason,
+            rest_detected_sec=segment.rest_detected_sec,
+            boundary_policy=segment.boundary_policy,
+        )
         if segment.duration_sec < self.config.min_segment_sec:
-            return ControllerEvent(self.state, message="short_segment")
+            return ControllerEvent(
+                self.state,
+                message="short_segment",
+                segment=evidence,
+                boundary_decision=self._boundary_decision(
+                    state_before_update,
+                    evidence,
+                    "short_segment",
+                ),
+            )
         missing = [
             sample.timestamp_sec
             for sample in segment.samples
@@ -239,19 +297,38 @@ class AutoKnee42Controller:
         if missing:
             raise RuntimeError(f"recognition feature missing for trigger timestamps: {missing}")
         features = tuple(self._features[sample.timestamp_sec] for sample in segment.samples)
+        decision_reason = "accepted_for_inference" if features else "dropped_empty_segment"
         return ControllerEvent(
             self.state,
             infer=bool(features),
             features=features,
-            message=segment.reason,
-            segment=SegmentEvidence(
-                clip_start_sec=segment.clip_start_sec,
-                clip_end_sec=segment.clip_end_sec,
-                finalize_sec=segment.finalize_sec,
-                reason=segment.reason,
-                rest_detected_sec=segment.rest_detected_sec,
-                boundary_policy=segment.boundary_policy,
+            message=segment.reason if features else decision_reason,
+            segment=evidence,
+            boundary_decision=self._boundary_decision(
+                state_before_update,
+                evidence,
+                decision_reason,
             ),
+        )
+
+    def _boundary_decision(
+        self,
+        state_before: str,
+        evidence: SegmentEvidence,
+        decision_reason: str,
+    ) -> BoundaryDecisionTelemetry:
+        return BoundaryDecisionTelemetry(
+            state_before=state_before,
+            state_after=self.engine.state,
+            clip_start_sec=evidence.clip_start_sec,
+            clip_end_sec=evidence.clip_end_sec,
+            finalize_sec=evidence.finalize_sec,
+            finalize_reason=evidence.reason,
+            decision_reason=decision_reason,
+            rest_detected_sec=evidence.rest_detected_sec,
+            boundary_policy=evidence.boundary_policy,
+            threshold_snapshot=self.config.to_dict(),
+            calibration=self.calibration_telemetry,
         )
 
     def add_held_observation(
@@ -395,15 +472,18 @@ class AutoKnee42Controller:
             int(np.ceil(self.config.end_hold_sec / frame_interval_sec)) + 4,
         )
         event = ControllerEvent(self.state)
+        first_boundary_event: ControllerEvent | None = None
         for _ in range(repeats):
             event = self.add_observation(
                 self._last_timestamp + frame_interval_sec,
                 self._last_rest_trigger.copy(),
                 self._last_rest_feature,
             )
+            if getattr(event, "boundary_decision", None) is not None and first_boundary_event is None:
+                first_boundary_event = event
             if event.infer:
                 return event
-        return event
+        return first_boundary_event or event
 
     def mark_result(self) -> ControllerEvent:
         if self.mode == "manual":

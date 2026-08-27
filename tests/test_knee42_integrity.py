@@ -6,6 +6,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path, PurePosixPath
@@ -185,6 +186,8 @@ class ReleaseSpecTests(unittest.TestCase):
                 "auto_trigger_knee_ivcam_local.json",
                 "auto_trigger_provenance.json",
                 "golden_contract.json",
+                "recognition/realtime/auto_trigger.py",
+                "recognition/realtime/knee42_controllers.py",
                 "packaging/knee42_ivcam/release_spec.json",
             ),
         )
@@ -410,6 +413,80 @@ class ManifestParserTests(unittest.TestCase):
 
 
 class ReleaseRootVerificationTests(unittest.TestCase):
+    def test_formal_entry_does_not_import_trigger_code_before_root_verification(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            sentinel = Path(temp_dir) / "trigger-imported.txt"
+            missing_bundle = Path(temp_dir) / "release" / "model"
+            script = f"""
+import importlib.abc
+import importlib.util
+from pathlib import Path
+import sys
+
+sentinel = Path({str(sentinel)!r})
+
+class TriggerLoader(importlib.abc.Loader):
+    def create_module(self, spec):
+        return None
+
+    def exec_module(self, module):
+        sentinel.write_text(module.__name__, encoding="utf-8")
+        if module.__name__.endswith("auto_trigger"):
+            module.load_formal_auto_trigger_config = lambda *_args, **_kwargs: object()
+            return
+        class Placeholder:
+            pass
+        module.AutoKnee42Controller = Placeholder
+        module.SlidingController = Placeholder
+        module.BoundaryDecisionTelemetry = Placeholder
+        module.SegmentEvidence = Placeholder
+
+class TriggerFinder(importlib.abc.MetaPathFinder):
+    TARGETS = {{
+        "recognition.realtime.auto_trigger",
+        "recognition.realtime.knee42_controllers",
+    }}
+
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname in self.TARGETS:
+            return importlib.util.spec_from_loader(fullname, TriggerLoader())
+        return None
+
+sys.meta_path.insert(0, TriggerFinder())
+
+from recognition.realtime.knee42_integrity import IntegrityError
+from recognition.realtime.knee42_ivcam import run_self_test
+import torch
+
+try:
+    run_self_test(
+        Path({str(missing_bundle)!r}),
+        device=torch.device("cpu"),
+        expected_root_manifest_sha256="0" * 64,
+    )
+except IntegrityError:
+    pass
+else:
+    raise SystemExit("missing release root unexpectedly verified")
+
+if sentinel.exists():
+    raise SystemExit("trigger code imported before release-root verification")
+"""
+            completed = subprocess.run(
+                [sys.executable, "-B", "-c", script],
+                cwd=REPO,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+        self.assertEqual(
+            completed.returncode,
+            0,
+            msg=f"stdout={completed.stdout}\nstderr={completed.stderr}",
+        )
+        self.assertFalse(sentinel.exists())
+
     def test_root_manifest_trust_anchor_requires_lowercase_sha256(self):
         invalid_digests = ("a" * 63, "A" * 64, "g" * 64, True)
         with tempfile.TemporaryDirectory() as temp_dir:

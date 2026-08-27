@@ -59,14 +59,33 @@ def frame_analysis(_previous, current, _config) -> AutoFrameAnalysis:
 
 
 class AutoTriggerProvenanceTests(unittest.TestCase):
-    def test_archived_trigger_source_and_config_are_exactly_locked(self):
+    def test_archived_upstream_and_current_runtime_hashes_are_separate(self):
         source = ROOT / "recognition" / "realtime" / "auto_trigger.py"
         controller = ROOT / "recognition" / "realtime" / "knee42_controllers.py"
         config = TEMPLATE / "auto_trigger_knee_ivcam_local.json"
+        provenance = json.loads(
+            (TEMPLATE / "auto_trigger_provenance.json").read_text(encoding="utf-8")
+        )
 
-        self.assertEqual(sha256(source), ARCHIVED_TRIGGER_SHA256)
-        self.assertEqual(sha256(controller), ARCHIVED_CONTROLLER_SHA256)
-        self.assertEqual(sha256(config), ARCHIVED_CONFIG_SHA256)
+        self.assertEqual(
+            provenance["archived_upstream"]["auto_trigger_source_sha256"],
+            ARCHIVED_TRIGGER_SHA256,
+        )
+        self.assertEqual(
+            provenance["archived_upstream"]["auto_trigger_controller_sha256"],
+            ARCHIVED_CONTROLLER_SHA256,
+        )
+        self.assertEqual(
+            provenance["archived_upstream"]["auto_trigger_config_sha256"],
+            ARCHIVED_CONFIG_SHA256,
+        )
+        self.assertEqual(provenance["runtime_binding"]["auto_trigger_source_sha256"], sha256(source))
+        self.assertEqual(
+            provenance["runtime_binding"]["auto_trigger_controller_sha256"],
+            sha256(controller),
+        )
+        self.assertEqual(provenance["runtime_binding"]["auto_trigger_config_sha256"], sha256(config))
+        self.assertEqual(provenance["trusted_root_binding"], "release_manifest_required")
         payload = json.loads(config.read_text(encoding="utf-8"))
         self.assertFalse(payload["knee_geometry_enabled"])
         self.assertFalse(payload["temporal_classifier_enabled"])
@@ -77,13 +96,13 @@ class AutoTriggerProvenanceTests(unittest.TestCase):
             (TEMPLATE / "auto_trigger_provenance.json").read_text(encoding="utf-8")
         )
 
-        self.assertEqual(payload["source_zip_sha256"], ARCHIVED_ZIP_SHA256)
-        self.assertEqual(payload["auto_trigger_source_sha256"], ARCHIVED_TRIGGER_SHA256)
         self.assertEqual(
-            payload["auto_trigger_controller_sha256"],
-            ARCHIVED_CONTROLLER_SHA256,
+            payload["archived_upstream"]["source_zip_sha256"], ARCHIVED_ZIP_SHA256
         )
-        self.assertEqual(payload["auto_trigger_config_sha256"], ARCHIVED_CONFIG_SHA256)
+        self.assertEqual(
+            payload["archived_upstream"]["auto_trigger_source_sha256"],
+            ARCHIVED_TRIGGER_SHA256,
+        )
         self.assertFalse(payload["temporal_classifier_enabled"])
 
 
@@ -132,6 +151,36 @@ class DualObservationTests(unittest.TestCase):
 
 
 class AutoKnee42ControllerTests(unittest.TestCase):
+    def test_short_finalize_retains_boundary_decision_telemetry(self):
+        controller = AutoKnee42Controller(
+            AutoTriggerConfig(
+                start_hold_sec=0.1,
+                end_hold_sec=0.1,
+                pre_roll_sec=0.0,
+                min_segment_sec=5.0,
+                reference_rest_enabled=False,
+            ),
+            analysis_fn=frame_analysis,
+        )
+        event = None
+        for timestamp, code in ((0.0, 0), (0.1, 1), (0.2, 1), (0.3, 0), (0.4, 0)):
+            event = controller.add_observation(
+                timestamp,
+                np.full(225, code, dtype=np.float32),
+                (f"values-{timestamp}", f"mask-{timestamp}"),
+            )
+        self.assertEqual(event.message, "short_segment")
+        decision = getattr(event, "boundary_decision", None)
+        self.assertIsNotNone(decision, "short finalize dropped its boundary decision")
+        self.assertEqual(decision.state_before, "END_CONFIRM")
+        self.assertEqual(decision.finalize_reason, "visible_rest_finalize")
+        self.assertEqual(decision.decision_reason, "short_segment")
+        self.assertEqual(decision.calibration.status.value, "disabled")
+        self.assertEqual(
+            decision.threshold_snapshot["start_motion_threshold"],
+            controller.config.start_motion_threshold,
+        )
+
     def test_toggle_clears_auto_state_and_enables_manual_space_recording(self):
         controller = AutoKnee42Controller(
             AutoTriggerConfig(reference_rest_enabled=False),
@@ -448,8 +497,33 @@ class AutoKnee42ControllerTests(unittest.TestCase):
             event = controller.finalize_video_eof()
 
         self.assertFalse(event.infer)
-        self.assertEqual(event.state, "END_CONFIRM")
-        add_observation.assert_not_called()
+
+    def test_video_eof_preserves_short_boundary_decision_instead_of_empty_followup(self):
+        controller = AutoKnee42Controller(
+            AutoTriggerConfig(
+                start_hold_sec=0.10,
+                pre_roll_sec=0.0,
+                end_hold_sec=0.30,
+                min_segment_sec=5.0,
+                reference_rest_enabled=False,
+            ),
+            analysis_fn=frame_analysis,
+        )
+        for timestamp, code in ((0.0, 0), (0.1, 1), (0.2, 1), (0.3, 0)):
+            controller.add_observation(
+                timestamp,
+                np.full(225, code, dtype=np.float32),
+                (f"values-{timestamp}", f"mask-{timestamp}"),
+            )
+
+        event = controller.finalize_video_eof()
+
+        self.assertFalse(event.infer)
+        self.assertEqual(event.message, "short_segment")
+        self.assertIsNotNone(event.boundary_decision)
+        self.assertEqual(event.boundary_decision.decision_reason, "short_segment")
+        self.assertEqual(event.boundary_decision.state_before, "END_CONFIRM")
+        self.assertEqual(event.state, event.boundary_decision.state_after)
 
     def test_held_trigger_samples_preserve_30hz_timing_with_frame_step_two(self):
         controller = AutoKnee42Controller(

@@ -53,6 +53,8 @@
       "auto_trigger_knee_ivcam_local.json",
       "auto_trigger_provenance.json",
       "golden_contract.json",
+      "recognition/realtime/auto_trigger.py",
+      "recognition/realtime/knee42_controllers.py",
       "packaging/knee42_ivcam/release_spec.json"
     ],
     "model": [

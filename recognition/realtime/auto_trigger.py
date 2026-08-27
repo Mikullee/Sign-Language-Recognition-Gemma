@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import json
+import math
 from collections import deque
 from dataclasses import asdict, dataclass, fields
+from enum import Enum
+from numbers import Real
 from pathlib import Path
 
 import numpy as np
@@ -25,6 +28,37 @@ LEFT_HIP = 23
 RIGHT_HIP = 24
 LEFT_KNEE = 25
 RIGHT_KNEE = 26
+FORMAL_AUTO_TRIGGER_CONFIG_NAME = "auto_trigger_knee_ivcam_local.json"
+
+
+class CalibrationState(str, Enum):
+    DISABLED = "disabled"
+    MISSING_REST_SIGNATURE = "missing_rest_signature"
+    REQUIRES_TWO_HANDS = "requires_two_hands"
+    MOTION_ABOVE_SEED_THRESHOLD = "motion_above_seed_threshold"
+    COLLECTING_REFERENCE = "collecting_reference"
+    CALIBRATED = "calibrated"
+
+
+@dataclass(frozen=True)
+class CalibrationTelemetry:
+    status: CalibrationState
+    blocker: CalibrationState | None
+    elapsed_sec: float
+    sample_count: int
+
+    @property
+    def calibrated(self) -> bool:
+        return self.status in {CalibrationState.DISABLED, CalibrationState.CALIBRATED}
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "status": self.status.value,
+            "blocker": None if self.blocker is None else self.blocker.value,
+            "elapsed_sec": self.elapsed_sec,
+            "sample_count": self.sample_count,
+            "calibrated": self.calibrated,
+        }
 
 
 @dataclass(frozen=True)
@@ -61,37 +95,86 @@ class AutoTriggerConfig:
     pose_visibility_threshold: float = 0.35
 
     def __post_init__(self) -> None:
+        numeric_fields = (
+            "start_motion_threshold",
+            "blank_motion_threshold",
+            "start_hold_sec",
+            "end_hold_sec",
+            "end_rest_vote_ratio",
+            "end_safety_tail_sec",
+            "pre_roll_sec",
+            "max_segment_sec",
+            "min_segment_sec",
+            "cooldown_sec",
+            "torso_motion_weight",
+            "knee_lateral_thigh_margin_ratio",
+            "knee_min_thigh_progress_ratio",
+            "knee_max_thigh_progress_ratio",
+            "reference_seed_sec",
+            "reference_seed_motion_threshold",
+            "reference_rest_distance_threshold",
+            "reference_departure_distance_threshold",
+            "temporal_start_probability_threshold",
+            "temporal_rest_probability_threshold",
+            "pose_visibility_threshold",
+        )
+        for name in numeric_fields:
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, Real):
+                raise TypeError(f"{name} must be a finite real number, got {value!r}")
+            if not math.isfinite(float(value)):
+                raise ValueError(f"{name} must be finite, got {value!r}")
+        for name in (
+            "knee_geometry_enabled",
+            "hidden_rest_enabled",
+            "reference_rest_enabled",
+            "temporal_classifier_enabled",
+        ):
+            value = getattr(self, name)
+            if type(value) is not bool:
+                raise TypeError(f"{name} must be bool, got {value!r}")
         if self.start_motion_threshold < 0 or self.blank_motion_threshold < 0:
-            raise ValueError("Motion thresholds must be non-negative.")
+            raise ValueError("start_motion_threshold and blank_motion_threshold must be non-negative")
         if self.start_hold_sec < 0 or self.pre_roll_sec < 0:
-            raise ValueError("Start hold and pre-roll must be non-negative.")
+            raise ValueError("start_hold_sec and pre_roll_sec must be non-negative")
         if self.end_hold_sec <= 0:
-            raise ValueError("End hold must be positive.")
-        if self.end_safety_tail_sec < 0:
-            raise ValueError("End safety tail must be non-negative.")
+            raise ValueError("end_hold_sec must be positive")
+        if not 0 <= self.end_safety_tail_sec <= self.end_hold_sec:
+            raise ValueError("end_safety_tail_sec must be in [0, end_hold_sec]")
         if not 0 < self.end_rest_vote_ratio <= 1:
-            raise ValueError("End rest vote ratio must be in (0, 1].")
+            raise ValueError("end_rest_vote_ratio must be in (0, 1]")
         if self.max_segment_sec <= 0 or self.min_segment_sec < 0:
-            raise ValueError("Segment durations are invalid.")
+            raise ValueError("min_segment_sec must be non-negative and max_segment_sec positive")
         if self.max_segment_sec < self.min_segment_sec:
-            raise ValueError("Maximum segment duration must be at least the minimum duration.")
+            raise ValueError("max_segment_sec must be at least min_segment_sec")
         if self.cooldown_sec < 0:
-            raise ValueError("Cooldown must be non-negative.")
+            raise ValueError("cooldown_sec must be non-negative")
+        if not 0 <= self.torso_motion_weight <= 1:
+            raise ValueError("torso_motion_weight must be in [0, 1]")
         if self.knee_lateral_thigh_margin_ratio <= 0:
-            raise ValueError("Knee lateral thigh margin must be positive.")
+            raise ValueError("knee_lateral_thigh_margin_ratio must be positive")
         if self.knee_min_thigh_progress_ratio >= self.knee_max_thigh_progress_ratio:
-            raise ValueError("Knee thigh progress range is invalid.")
+            raise ValueError(
+                "knee_min_thigh_progress_ratio must be below knee_max_thigh_progress_ratio"
+            )
         if self.reference_seed_sec < 0 or self.reference_seed_motion_threshold < 0:
-            raise ValueError("Reference seed settings must be non-negative.")
+            raise ValueError(
+                "reference_seed_sec and reference_seed_motion_threshold must be non-negative"
+            )
         if (
             self.reference_rest_distance_threshold <= 0
             or self.reference_departure_distance_threshold <= 0
         ):
-            raise ValueError("Reference pose distance thresholds must be positive.")
+            raise ValueError(
+                "reference_rest_distance_threshold and "
+                "reference_departure_distance_threshold must be positive"
+            )
         if not 0 < self.temporal_start_probability_threshold < 1:
-            raise ValueError("Temporal start probability threshold must be in (0, 1).")
+            raise ValueError("temporal_start_probability_threshold must be in (0, 1)")
         if not 0 < self.temporal_rest_probability_threshold < 1:
-            raise ValueError("Temporal rest probability threshold must be in (0, 1).")
+            raise ValueError("temporal_rest_probability_threshold must be in (0, 1)")
+        if not 0 <= self.pose_visibility_threshold <= 1:
+            raise ValueError("pose_visibility_threshold must be in [0, 1]")
 
     def to_dict(self) -> dict[str, float | bool]:
         return asdict(self)
@@ -171,6 +254,37 @@ def load_auto_trigger_config(
         if value is not None:
             values[key] = value
     return AutoTriggerConfig(**values)
+
+
+def load_formal_auto_trigger_config(release_root: str | Path) -> AutoTriggerConfig:
+    """Load the one release-root trigger config with an exact, complete schema."""
+    config_path = Path(release_root) / FORMAL_AUTO_TRIGGER_CONFIG_NAME
+    if not config_path.is_file():
+        raise FileNotFoundError(f"formal auto-trigger config missing: {config_path}")
+    try:
+        payload = json.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"invalid formal auto-trigger config {config_path}: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise ValueError(f"formal auto-trigger config {config_path} must contain an object")
+    required = {field.name for field in fields(AutoTriggerConfig)}
+    missing = sorted(required - set(payload))
+    unknown = sorted(set(payload) - required)
+    if missing:
+        raise ValueError(
+            f"formal auto-trigger config {config_path} missing fields: {', '.join(missing)}"
+        )
+    if unknown:
+        raise ValueError(
+            f"formal auto-trigger config {config_path} has unknown fields: {', '.join(unknown)}"
+        )
+    config = AutoTriggerConfig(**payload)
+    if config.start_motion_threshold > config.blank_motion_threshold:
+        raise ValueError(
+            "formal auto-trigger config start_motion_threshold must be <= "
+            "blank_motion_threshold"
+        )
+    return config
 
 
 def decompose_frame_vector(frame_vector: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -429,6 +543,21 @@ class AutoTriggerEngine:
         self._reference_wrist_signatures: list[np.ndarray] = []
         self._rest_reference_signature: np.ndarray | None = None
         self._rest_wrist_reference_signature: np.ndarray | None = None
+        self._calibration_telemetry = self._initial_calibration_telemetry()
+
+    def _initial_calibration_telemetry(self) -> CalibrationTelemetry:
+        if not self.config.reference_rest_enabled:
+            return CalibrationTelemetry(CalibrationState.DISABLED, None, 0.0, 0)
+        return CalibrationTelemetry(
+            CalibrationState.MISSING_REST_SIGNATURE,
+            CalibrationState.MISSING_REST_SIGNATURE,
+            0.0,
+            0,
+        )
+
+    @property
+    def calibration_telemetry(self) -> CalibrationTelemetry:
+        return self._calibration_telemetry
 
     def reset(self) -> None:
         self.state = SEGMENT_STATE_IDLE
@@ -445,6 +574,7 @@ class AutoTriggerEngine:
         self._reference_wrist_signatures = []
         self._rest_reference_signature = None
         self._rest_wrist_reference_signature = None
+        self._calibration_telemetry = self._initial_calibration_telemetry()
 
     def update(
         self,
@@ -624,33 +754,62 @@ class AutoTriggerEngine:
         return None
 
     def _update_rest_reference(self, timestamp_sec: float, analysis: AutoFrameAnalysis) -> None:
-        if not self.config.reference_rest_enabled or self._rest_reference_signature is not None:
+        if not self.config.reference_rest_enabled:
+            self._calibration_telemetry = CalibrationTelemetry(
+                CalibrationState.DISABLED, None, 0.0, 0
+            )
             return
-        eligible = bool(
-            analysis.rest_signature is not None
-            and analysis.wrist_rest_signature is not None
-            and analysis.explicit_hands_detected == 2
-            and analysis.effective_motion_score <= self.config.reference_seed_motion_threshold
-        )
+        if self._rest_reference_signature is not None:
+            self._calibration_telemetry = CalibrationTelemetry(
+                CalibrationState.CALIBRATED,
+                None,
+                self.config.reference_seed_sec,
+                len(self._reference_signatures),
+            )
+            return
+        blocker: CalibrationState | None = None
+        if analysis.explicit_hands_detected != 2:
+            blocker = CalibrationState.REQUIRES_TWO_HANDS
+        elif analysis.rest_signature is None or analysis.wrist_rest_signature is None:
+            blocker = CalibrationState.MISSING_REST_SIGNATURE
+        elif analysis.effective_motion_score > self.config.reference_seed_motion_threshold:
+            blocker = CalibrationState.MOTION_ABOVE_SEED_THRESHOLD
         # Do not start the countdown from camera-open: pose/hand landmarks can
         # be absent for the first frames while iVCam autofocus settles.
-        if not eligible:
-            if not self._reference_signatures:
-                self._reference_seed_start_sec = None
+        if blocker is not None:
+            self._reference_seed_start_sec = None
+            self._reference_signatures.clear()
+            self._reference_wrist_signatures.clear()
+            self._calibration_telemetry = CalibrationTelemetry(blocker, blocker, 0.0, 0)
             return
         if self._reference_seed_start_sec is None:
             self._reference_seed_start_sec = timestamp_sec
+        assert analysis.rest_signature is not None
+        assert analysis.wrist_rest_signature is not None
         self._reference_signatures.append(np.asarray(analysis.rest_signature, dtype=np.float32))
         self._reference_wrist_signatures.append(
             np.asarray(analysis.wrist_rest_signature, dtype=np.float32)
         )
-        if timestamp_sec - self._reference_seed_start_sec >= self.config.reference_seed_sec:
+        elapsed_sec = max(0.0, timestamp_sec - self._reference_seed_start_sec)
+        self._calibration_telemetry = CalibrationTelemetry(
+            CalibrationState.COLLECTING_REFERENCE,
+            None,
+            elapsed_sec,
+            len(self._reference_signatures),
+        )
+        if elapsed_sec >= self.config.reference_seed_sec:
             self._rest_reference_signature = np.median(
                 np.stack(self._reference_signatures), axis=0
             ).astype(np.float32)
             self._rest_wrist_reference_signature = np.median(
                 np.stack(self._reference_wrist_signatures), axis=0
             ).astype(np.float32)
+            self._calibration_telemetry = CalibrationTelemetry(
+                CalibrationState.CALIBRATED,
+                None,
+                elapsed_sec,
+                len(self._reference_signatures),
+            )
 
     def _finalize(
         self,

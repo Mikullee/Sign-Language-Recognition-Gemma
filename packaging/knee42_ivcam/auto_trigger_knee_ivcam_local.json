@@ -21,5 +21,7 @@
   "reference_rest_distance_threshold": 0.30,
   "reference_departure_distance_threshold": 0.10,
   "temporal_classifier_enabled": false,
+  "temporal_start_probability_threshold": 0.55,
+  "temporal_rest_probability_threshold": 0.55,
   "pose_visibility_threshold": 0.35
 }

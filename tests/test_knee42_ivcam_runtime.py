@@ -7,6 +7,7 @@ import json
 import tempfile
 import unittest
 from contextlib import redirect_stderr
+from dataclasses import asdict
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -16,8 +17,10 @@ import torch
 import recognition.realtime.knee42_ivcam as knee42_ivcam
 
 from recognition.inference.daily30_sentence_model_utils import BiGRUSentenceClassifier
+from recognition.realtime.auto_trigger import AutoTriggerConfig
 from recognition.realtime.knee42_capture import OpenCVFrameSource
 from recognition.realtime.knee42_clock import LiveClock
+from recognition.realtime.knee42_integrity import VerifiedRelease
 from recognition.realtime.knee42_ivcam import (
     InferenceResult,
     IntegrityError,
@@ -56,14 +59,67 @@ def write_trigger_runtime(root: Path) -> None:
     controller = root / "recognition" / "realtime" / "knee42_controllers.py"
     controller.write_text("archived controller", encoding="utf-8")
     config = root / "auto_trigger_knee_ivcam_local.json"
-    config.write_text("{}", encoding="utf-8")
+    config.write_text(
+        json.dumps(
+            asdict(
+                AutoTriggerConfig(
+                    start_motion_threshold=0.015,
+                    blank_motion_threshold=0.022,
+                )
+            )
+        ),
+        encoding="utf-8",
+    )
     write_json(
         root / "auto_trigger_provenance.json",
         {
-            "auto_trigger_source_sha256": sha256(source),
-            "auto_trigger_controller_sha256": sha256(controller),
-            "auto_trigger_config_sha256": sha256(config),
+            "schema_version": 2,
+            "archived_upstream": {
+                "source_zip_name": "fixture.zip",
+                "source_zip_sha256": "a" * 64,
+                "auto_trigger_source_sha256": "b" * 64,
+                "auto_trigger_controller_sha256": "c" * 64,
+                "auto_trigger_config_sha256": "d" * 64,
+                "temporal_model_sha256": "e" * 64,
+            },
+            "runtime_binding": {
+                "auto_trigger_source_sha256": sha256(source),
+                "auto_trigger_controller_sha256": sha256(controller),
+                "auto_trigger_config_sha256": sha256(config),
+            },
+            "trusted_root_binding": "release_manifest_required",
         },
+    )
+
+
+def verified_trigger_release(
+    root: Path,
+    *,
+    omit: str | None = None,
+    root_manifest_sha256: str = "c" * 64,
+) -> VerifiedRelease:
+    paths = (
+        "auto_trigger_provenance.json",
+        "auto_trigger_knee_ivcam_local.json",
+        "recognition/realtime/auto_trigger.py",
+        "recognition/realtime/knee42_controllers.py",
+    )
+    hashes = {
+        relative: sha256(root.joinpath(*relative.split("/")))
+        for relative in paths
+        if relative != omit
+    }
+    return VerifiedRelease(
+        root=root.resolve(),
+        release_version="v1.0.1-v13.1",
+        app_version="v13.1",
+        model_version="v11",
+        label_count=42,
+        input_shape=(1, 64, 438),
+        source_commit="a" * 40,
+        dependency_lock_sha256="b" * 64,
+        root_manifest_sha256=root_manifest_sha256,
+        file_hashes=hashes,
     )
 
 
@@ -232,6 +288,41 @@ class ValueDetectors:
 
 
 class RuntimeTests(unittest.TestCase):
+    def setUp(self):
+        def verify_fixture(root, *, expected_root_manifest_sha256):
+            release_root = Path(root).resolve()
+            required = (
+                release_root / "auto_trigger_provenance.json",
+                release_root / "auto_trigger_knee_ivcam_local.json",
+                release_root / "recognition" / "realtime" / "auto_trigger.py",
+                release_root / "recognition" / "realtime" / "knee42_controllers.py",
+            )
+            if all(path.is_file() for path in required):
+                return verified_trigger_release(
+                    release_root,
+                    root_manifest_sha256=expected_root_manifest_sha256,
+                )
+            return VerifiedRelease(
+                root=release_root,
+                release_version="v1.0.1-v13.1",
+                app_version="v13.1",
+                model_version="v11",
+                label_count=42,
+                input_shape=(1, 64, 438),
+                source_commit="a" * 40,
+                dependency_lock_sha256="b" * 64,
+                root_manifest_sha256=expected_root_manifest_sha256,
+                file_hashes={},
+            )
+
+        self._verify_release_root = mock.patch.object(
+            knee42_ivcam,
+            "verify_release_root",
+            side_effect=verify_fixture,
+        )
+        self._verify_release_root.start()
+        self.addCleanup(self._verify_release_root.stop)
+
     def test_bundle_rejects_non_weight_checkpoint_payload(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             bundle = make_bundle(Path(temp_dir))
@@ -498,6 +589,11 @@ class RuntimeTests(unittest.TestCase):
             for display_mirror in (False, True):
                 with (
                     mock.patch.object(knee42_ivcam, "verify_auto_trigger_provenance"),
+                    mock.patch.object(
+                        knee42_ivcam,
+                        "load_formal_auto_trigger_config",
+                        return_value=object(),
+                    ),
                     mock.patch.object(knee42_ivcam, "load_bundle", return_value=Bundle(bundle_root)),
                     mock.patch.object(knee42_ivcam, "open_video", side_effect=open_source),
                     mock.patch.object(knee42_ivcam, "create_mediapipe_detectors", side_effect=create_detectors),
@@ -521,6 +617,7 @@ class RuntimeTests(unittest.TestCase):
                             rotation=90,
                             input_mirror=True,
                             display_mirror=display_mirror,
+                            expected_root_manifest_sha256="f" * 64,
                         )
                     )
 
@@ -564,6 +661,8 @@ class RuntimeTests(unittest.TestCase):
         held_calls = []
         recorder_origins = []
         recorder_timestamps = []
+        recorder_contexts = []
+        recorded_decisions = []
 
         class PacketOnlySource:
             status = "video:irregular.mp4"
@@ -608,9 +707,19 @@ class RuntimeTests(unittest.TestCase):
             def add_held_observation_at_times(self, timestamps_sec, _trigger, feature):
                 held_calls.append((tuple(timestamps_sec), float(feature[0][0])))
                 return SimpleNamespace(
-                    infer=len(held_calls) == 2,
-                    features=(feature,),
+                    infer=False,
+                    features=(),
                     segment=None,
+                    boundary_decision=(
+                        None
+                        if len(held_calls) == 1
+                        else SimpleNamespace(
+                            to_dict=lambda: {
+                                "finalize_reason": "visible_rest_finalize",
+                                "decision_reason": "short_segment",
+                            }
+                        )
+                    ),
                 )
 
             def finalize_video_eof(self):
@@ -646,6 +755,7 @@ class RuntimeTests(unittest.TestCase):
 
             def __init__(self, _output_root, **kwargs):
                 recorder_origins.append(kwargs["source_origin_sec"])
+                recorder_contexts.append(kwargs["runtime_context"])
                 self.frame_count = 0
 
             def add_frame(self, _frame, *, timestamp_sec):
@@ -654,6 +764,9 @@ class RuntimeTests(unittest.TestCase):
 
             def record_segment(self, _segment, _result):
                 return None
+
+            def record_boundary_decision(self, decision, result=None):
+                recorded_decisions.append((decision.to_dict(), result))
 
             def stop(self):
                 return SimpleNamespace(
@@ -668,13 +781,20 @@ class RuntimeTests(unittest.TestCase):
             bundle_root = root / "model"
             bundle_root.mkdir()
             (root / "auto_trigger_knee_ivcam_local.json").write_text("{}", encoding="utf-8")
+            (root / "auto_trigger_provenance.json").write_text("{}", encoding="utf-8")
+            expected_config_hash = knee42_ivcam.sha256_canonical_text_file(
+                root / "auto_trigger_knee_ivcam_local.json"
+            )
+            expected_provenance_hash = knee42_ivcam.sha256_canonical_text_file(
+                root / "auto_trigger_provenance.json"
+            )
             bundle = FakeBundle(bundle_root)
 
             with (
                 mock.patch.object(knee42_ivcam, "verify_auto_trigger_provenance"),
                 mock.patch.object(knee42_ivcam, "load_bundle", return_value=bundle),
                 mock.patch.object(knee42_ivcam, "open_video", return_value=packet_source),
-                mock.patch.object(knee42_ivcam, "load_auto_trigger_config", return_value=object()),
+                mock.patch.object(knee42_ivcam, "load_formal_auto_trigger_config", return_value=object()),
                 mock.patch.object(knee42_ivcam, "AutoKnee42Controller", FakeAutoController),
                 mock.patch.object(knee42_ivcam, "create_mediapipe_detectors", return_value=FakeDetectors()),
                 mock.patch.object(knee42_ivcam, "SegmentSessionRecorder", FakeRecorder),
@@ -688,6 +808,7 @@ class RuntimeTests(unittest.TestCase):
                     headless=True,
                     max_frames=None,
                     start_logging=True,
+                    expected_root_manifest_sha256="f" * 64,
                 )
 
         self.assertEqual(
@@ -699,6 +820,22 @@ class RuntimeTests(unittest.TestCase):
         )
         self.assertEqual(recorder_origins, [0.0])
         self.assertEqual(recorder_timestamps, [0.0, 0.033, 0.071])
+        self.assertEqual(len(recorder_contexts), 1)
+        self.assertEqual(
+            recorder_contexts[0].trigger_config_sha256,
+            expected_config_hash,
+        )
+        self.assertEqual(
+            recorder_contexts[0].trigger_provenance_sha256,
+            expected_provenance_hash,
+        )
+        self.assertEqual(recorded_decisions[0][0]["decision_reason"], "short_segment")
+        self.assertIsNone(recorded_decisions[0][1])
+        self.assertEqual(result["boundary_decisions"], [recorded_decisions[0][0]])
+        self.assertFalse(result["inference_performed"])
+        self.assertIsNone(result["top1"])
+        self.assertIsNone(result["top1_raw_probability"])
+        self.assertEqual(result["top3"], [])
         self.assertEqual(result["raw_frames"], 3)
         self.assertEqual(result["feature_frames"], 2)
         self.assertEqual(result["clock_mode"], "video_source_timestamp")
@@ -818,7 +955,7 @@ class RuntimeTests(unittest.TestCase):
                 mock.patch.object(knee42_ivcam, "open_video", return_value=packet_source),
                 mock.patch.object(
                     knee42_ivcam,
-                    "load_auto_trigger_config",
+                    "load_formal_auto_trigger_config",
                     return_value=object(),
                 ),
                 mock.patch.object(
@@ -849,25 +986,30 @@ class RuntimeTests(unittest.TestCase):
                     device=torch.device("cpu"),
                     headless=False,
                     max_frames=None,
+                    expected_root_manifest_sha256="f" * 64,
                 )
 
         self.assertEqual(held_calls, [((0.066, 0.100), 1.0)])
         self.assertTrue(packet_source.released)
 
-    def test_source_is_released_when_trigger_config_is_missing_after_open(self):
-        source = SimpleNamespace(released=False)
-        source.release = lambda: setattr(source, "released", True)
-
+    def test_trigger_config_is_validated_before_bundle_or_source_open(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             bundle_root = Path(temp_dir) / "model"
             bundle_root.mkdir()
-            bundle = SimpleNamespace(root=bundle_root, frame_step=2)
             with (
                 mock.patch.object(knee42_ivcam, "verify_auto_trigger_provenance"),
-                mock.patch.object(knee42_ivcam, "load_bundle", return_value=bundle),
-                mock.patch.object(knee42_ivcam, "open_video", return_value=source),
+                mock.patch.object(
+                    knee42_ivcam,
+                    "load_bundle",
+                    side_effect=AssertionError("bundle must not load"),
+                ) as load_bundle_mock,
+                mock.patch.object(
+                    knee42_ivcam,
+                    "open_video",
+                    side_effect=AssertionError("source must not open"),
+                ) as open_video_mock,
             ):
-                with self.assertRaisesRegex(IntegrityError, "config missing"):
+                with self.assertRaisesRegex((FileNotFoundError, IntegrityError), "auto_trigger_knee_ivcam_local.json|config"):
                     knee42_ivcam.run_capture(
                         bundle_root,
                         mode="auto",
@@ -876,9 +1018,32 @@ class RuntimeTests(unittest.TestCase):
                         device=torch.device("cpu"),
                         headless=True,
                         max_frames=1,
+                        expected_root_manifest_sha256="f" * 64,
                     )
 
-        self.assertTrue(source.released)
+            load_bundle_mock.assert_not_called()
+            open_video_mock.assert_not_called()
+
+    def test_legacy_trigger_loader_patch_seam_delegates_to_the_formal_loader(self):
+        legacy_loader = getattr(knee42_ivcam, "load_auto_trigger_config", None)
+
+        self.assertTrue(
+            callable(legacy_loader),
+            "legacy load_auto_trigger_config patch seam is missing",
+        )
+        if not callable(legacy_loader):
+            return
+        sentinel = object()
+        package_root = Path("verified-release")
+        with mock.patch.object(
+            knee42_ivcam,
+            "load_auto_trigger_config",
+            return_value=sentinel,
+        ) as patched_loader:
+            loaded = knee42_ivcam.load_formal_auto_trigger_config(package_root)
+
+        self.assertIs(loaded, sentinel)
+        patched_loader.assert_called_once_with(package_root)
 
     def test_source_is_released_when_controller_creation_fails_after_open(self):
         source = SimpleNamespace(released=False)
@@ -898,7 +1063,7 @@ class RuntimeTests(unittest.TestCase):
                 mock.patch.object(knee42_ivcam, "open_video", return_value=source),
                 mock.patch.object(
                     knee42_ivcam,
-                    "load_auto_trigger_config",
+                    "load_formal_auto_trigger_config",
                     return_value=object(),
                 ),
                 mock.patch.object(
@@ -916,6 +1081,7 @@ class RuntimeTests(unittest.TestCase):
                         device=torch.device("cpu"),
                         headless=True,
                         max_frames=1,
+                        expected_root_manifest_sha256="f" * 64,
                     )
 
         self.assertTrue(source.released)
@@ -949,7 +1115,7 @@ class RuntimeTests(unittest.TestCase):
                 mock.patch.object(knee42_ivcam, "open_video", return_value=source),
                 mock.patch.object(
                     knee42_ivcam,
-                    "load_auto_trigger_config",
+                    "load_formal_auto_trigger_config",
                     return_value=object(),
                 ),
                 mock.patch.object(
@@ -969,6 +1135,7 @@ class RuntimeTests(unittest.TestCase):
                         device=torch.device("cpu"),
                         headless=False,
                         max_frames=1,
+                        expected_root_manifest_sha256="f" * 64,
                     )
 
         self.assertTrue(source.released)
@@ -1119,6 +1286,9 @@ class RuntimeTests(unittest.TestCase):
             (root / "auto_trigger_knee_ivcam_local.json").write_text(
                 "{}", encoding="utf-8"
             )
+            (root / "auto_trigger_provenance.json").write_text(
+                "{}", encoding="utf-8"
+            )
             with (
                 mock.patch.object(knee42_ivcam, "verify_auto_trigger_provenance"),
                 mock.patch.object(
@@ -1129,7 +1299,7 @@ class RuntimeTests(unittest.TestCase):
                 mock.patch.object(knee42_ivcam, "open_video", return_value=packet_source),
                 mock.patch.object(
                     knee42_ivcam,
-                    "load_auto_trigger_config",
+                    "load_formal_auto_trigger_config",
                     return_value=object(),
                 ),
                 mock.patch.object(
@@ -1167,6 +1337,7 @@ class RuntimeTests(unittest.TestCase):
                         headless=False,
                         max_frames=2,
                         start_logging=True,
+                        expected_root_manifest_sha256="f" * 64,
                     )
 
         self.assertTrue(packet_source.released)
@@ -1218,7 +1389,7 @@ class RuntimeTests(unittest.TestCase):
                 mock.patch.object(knee42_ivcam, "open_video", return_value=packet_source),
                 mock.patch.object(
                     knee42_ivcam,
-                    "load_auto_trigger_config",
+                    "load_formal_auto_trigger_config",
                     return_value=object(),
                 ),
                 mock.patch.object(
@@ -1241,6 +1412,7 @@ class RuntimeTests(unittest.TestCase):
                         device=torch.device("cpu"),
                         headless=True,
                         max_frames=1,
+                        expected_root_manifest_sha256="f" * 64,
                     )
 
         self.assertEqual(held_calls, [])
@@ -1296,7 +1468,7 @@ class RuntimeTests(unittest.TestCase):
                 mock.patch.object(knee42_ivcam, "open_video", return_value=packet_source),
                 mock.patch.object(
                     knee42_ivcam,
-                    "load_auto_trigger_config",
+                    "load_formal_auto_trigger_config",
                     return_value=object(),
                 ),
                 mock.patch.object(
@@ -1318,6 +1490,7 @@ class RuntimeTests(unittest.TestCase):
                     device=torch.device("cpu"),
                     headless=True,
                     max_frames=None,
+                    expected_root_manifest_sha256="f" * 64,
                 )
 
         self.assertEqual(
@@ -1339,27 +1512,101 @@ class RuntimeTests(unittest.TestCase):
         )
         self.assertTrue(packet_source.released)
 
+    def test_provenance_requires_verified_release_mapping_and_rejects_joint_forgery(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            write_trigger_runtime(root)
+            trusted = verified_trigger_release(root)
+            verify_auto_trigger_provenance(root, trusted_release=trusted)
+
+            source = root / "recognition" / "realtime" / "auto_trigger.py"
+            source.write_text("forged runtime", encoding="utf-8")
+            provenance_path = root / "auto_trigger_provenance.json"
+            provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
+            provenance["runtime_binding"]["auto_trigger_source_sha256"] = sha256(source)
+            write_json(provenance_path, provenance)
+
+            with self.assertRaisesRegex(IntegrityError, "trusted release|manifest|provenance"):
+                verify_auto_trigger_provenance(root, trusted_release=trusted)
+
+            missing = verified_trigger_release(
+                root,
+                omit="recognition/realtime/knee42_controllers.py",
+            )
+            with self.assertRaisesRegex(IntegrityError, "knee42_controllers.py"):
+                verify_auto_trigger_provenance(root, trusted_release=missing)
+
+    def test_external_root_anchor_fails_before_bundle_or_source_open(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            bundle_root = Path(temp_dir) / "model"
+            bundle_root.mkdir()
+            with (
+                mock.patch.object(
+                    knee42_ivcam,
+                    "verify_release_root",
+                    side_effect=IntegrityError("root anchor mismatch"),
+                ) as verify_root,
+                mock.patch.object(knee42_ivcam, "verify_auto_trigger_provenance") as verify_trigger,
+                mock.patch.object(knee42_ivcam, "load_bundle") as load_bundle_mock,
+                mock.patch.object(knee42_ivcam, "open_video") as open_video_mock,
+            ):
+                with self.assertRaisesRegex(IntegrityError, "root anchor mismatch"):
+                    knee42_ivcam.run_capture(
+                        bundle_root,
+                        mode="auto",
+                        camera_index=None,
+                        video=Path("forged.mp4"),
+                        device=torch.device("cpu"),
+                        headless=True,
+                        max_frames=1,
+                        expected_root_manifest_sha256="a" * 64,
+                    )
+
+            verify_root.assert_called_once_with(
+                Path(temp_dir).resolve(),
+                expected_root_manifest_sha256="a" * 64,
+            )
+            verify_trigger.assert_not_called()
+            load_bundle_mock.assert_not_called()
+            open_video_mock.assert_not_called()
+
+    def test_cli_requires_and_parses_external_root_manifest_sha256(self):
+        parser = build_parser()
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            parser.parse_args(["--bundle", "model"])
+        parsed = parser.parse_args(
+            [
+                "--bundle",
+                "model",
+                "--root-manifest-sha256",
+                "a" * 64,
+            ]
+        )
+        self.assertEqual(parsed.root_manifest_sha256, "a" * 64)
+
     def test_auto_trigger_provenance_rejects_source_tampering(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             write_trigger_runtime(root)
             source = root / "recognition" / "realtime" / "auto_trigger.py"
-            verify_auto_trigger_provenance(root)
+            trusted = verified_trigger_release(root)
+            verify_auto_trigger_provenance(root, trusted_release=trusted)
             source.write_text("tampered", encoding="utf-8")
 
-            with self.assertRaisesRegex(IntegrityError, "auto-trigger source"):
-                verify_auto_trigger_provenance(root)
+            with self.assertRaisesRegex(IntegrityError, "auto_trigger.py"):
+                verify_auto_trigger_provenance(root, trusted_release=trusted)
 
     def test_auto_trigger_provenance_rejects_controller_tampering(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             write_trigger_runtime(root)
-            verify_auto_trigger_provenance(root)
+            trusted = verified_trigger_release(root)
+            verify_auto_trigger_provenance(root, trusted_release=trusted)
             controller = root / "recognition" / "realtime" / "knee42_controllers.py"
             controller.write_text("tampered", encoding="utf-8")
 
-            with self.assertRaisesRegex(IntegrityError, "auto-trigger controller"):
-                verify_auto_trigger_provenance(root)
+            with self.assertRaisesRegex(IntegrityError, "knee42_controllers.py"):
+                verify_auto_trigger_provenance(root, trusted_release=trusted)
 
     def test_tampered_standardizer_fails_before_model_load(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1442,17 +1689,26 @@ class RuntimeTests(unittest.TestCase):
         self.assertIn("F fullscreen", rendered)
 
         args = build_parser().parse_args(
-            ["--bundle", "model", "--start-logging", "--recordings-dir", "evidence"]
+            [
+                "--bundle",
+                "model",
+                "--root-manifest-sha256",
+                "f" * 64,
+                "--start-logging",
+                "--recordings-dir",
+                "evidence",
+            ]
         )
         self.assertTrue(args.start_logging)
         self.assertEqual(args.recordings_dir, Path("evidence"))
 
     def test_cli_defaults_to_auto_and_keeps_manual_and_sliding_choices(self):
         parser = build_parser()
+        required = ["--bundle", "model", "--root-manifest-sha256", "f" * 64]
 
-        automatic = parser.parse_args(["--bundle", "model"])
-        manual = parser.parse_args(["--bundle", "model", "--mode", "manual"])
-        sliding = parser.parse_args(["--bundle", "model", "--mode", "sliding"])
+        automatic = parser.parse_args(required)
+        manual = parser.parse_args([*required, "--mode", "manual"])
+        sliding = parser.parse_args([*required, "--mode", "sliding"])
 
         self.assertEqual(automatic.mode, "auto")
         self.assertEqual(automatic.rotation, "auto")
@@ -1463,8 +1719,7 @@ class RuntimeTests(unittest.TestCase):
 
         oriented = parser.parse_args(
             [
-                "--bundle",
-                "model",
+                *required,
                 "--rotation",
                 "270",
                 "--input-mirror",
@@ -1484,7 +1739,7 @@ class RuntimeTests(unittest.TestCase):
         ):
             with self.subTest(invalid_args=invalid_args):
                 with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
-                    parser.parse_args(["--bundle", "model", *invalid_args])
+                    parser.parse_args([*required, *invalid_args])
 
     def test_auto_states_are_localized_for_operator_feedback(self):
         self.assertEqual(auto_display_state("IDLE_BLANK", calibrated=False), "CALIBRATING")
@@ -1492,6 +1747,20 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(auto_display_state("SIGNING_ACTIVE", calibrated=True), "SIGNING")
         self.assertEqual(auto_display_state("END_CONFIRM", calibrated=True), "END_CONFIRM")
         self.assertEqual(auto_display_state("FORCED_FINALIZE_COOLDOWN", calibrated=True), "COOLDOWN")
+
+    def test_calibration_display_includes_blocker_elapsed_and_sample_count(self):
+        controller = knee42_ivcam.AutoKnee42Controller(
+            AutoTriggerConfig(reference_rest_enabled=True)
+        )
+        rendered = auto_display_state(
+            "IDLE_BLANK",
+            calibration=controller.calibration_telemetry,
+        )
+
+        self.assertIn("CALIBRATING", rendered)
+        self.assertIn("missing_rest_signature", rendered)
+        self.assertIn("elapsed=0.000s", rendered)
+        self.assertIn("samples=0", rendered)
 
     def test_overlay_compacts_long_video_source_without_discarding_label_text(self):
         result = InferenceResult(
@@ -1554,6 +1823,7 @@ class RuntimeTests(unittest.TestCase):
                 result = run_self_test(
                     bundle,
                     device=torch.device("cpu"),
+                    expected_root_manifest_sha256="f" * 64,
                     detector_factory=detector_factory,
                 )
 
@@ -1577,6 +1847,7 @@ class RuntimeTests(unittest.TestCase):
                 run_self_test(
                     bundle,
                     device=torch.device("cpu"),
+                    expected_root_manifest_sha256="f" * 64,
                     detector_factory=detector_factory,
                 )
 
