@@ -27,7 +27,7 @@
    · [為什麼是 64](#35-為什麼是-64)
    · [訓練 vs 即時](#36-訓練路徑與即時路徑的差異)
 4. [公開模型](#4-公開模型)
-5. [重現訓練環境](#5-重現訓練環境)
+5. [怎麼跑起來](#5-怎麼跑起來)
 6. [如何製作：開發歷程與主要困難](#6-如何製作開發歷程與主要困難)
 7. [參考文獻](#7-參考文獻)
 8. [資料政策與授權](#8-資料政策與授權)
@@ -485,6 +485,35 @@ return np.concatenate((standardized, sampled_mask.astype(np.float32)), axis=1)
 2. **低動作回溯錨點（`low_motion_anchor_v1`）** — 不以「偵測到靜止的時刻」為終點，而回溯至導向該靜止的連續低動作區間起點，再加 0.15 秒 safety tail。同時避免尾段冗長與尾段截斷。
 3. **手腕 fallback** — 雙手置於大腿時 MediaPipe Hand landmarks 常整體消失。校準階段另行記錄肩寬正規化後的手腕簽章，手部消失時改由 pose wrists 判定。惟「手部消失」本身絕不構成靜止證據：手腕必須可見、位置符合校準值且低於動作門檻。
 
+### 3.9 離線影片路徑與抽取契約
+
+相機不在場時走同一個模型:`recognition/transformer/landmarks.py` 讀影片、
+`segmentation.py` 依手腕動能切段,兩者共用 §3.2–3.5 的合約。CLI 是
+[`scripts/analyze_knee42_video.py`](scripts/analyze_knee42_video.py)。
+
+**這裡有三個容易踩錯、而且錯了不會報錯只會讓準確率無聲下降的點。**
+訓練特徵是由 [`scripts/prepare_knee42_features_final.py`](scripts/prepare_knee42_features_final.py)
+抽取的,任何推論路徑都必須跟它一致:
+
+| 項目 | 必須 | 為什麼 |
+|---|---|---|
+| MediaPipe 執行模式 | **`RunningMode.IMAGE`** | 訓練抽取、資料驗證與即時推論全部逐幀獨立偵測。`VIDEO` 模式會加入時序追蹤與平滑,產生的 landmark 分布與訓練不同 |
+| 畫面翻轉 | **不翻轉**(`horizontal_mirror: False`) | 特徵快取即以未翻轉畫面抽取,手語者左肩落在 +x |
+| handedness | **原樣採用** | Tasks API 的標記本就對應未翻轉輸入,前端或後端再做左右交換會把兩隻手對調 |
+| pose 模型 | **`pose_landmarker_lite`** | 每個 `.npz` 都記著抽取當時的模型 SHA-256,`full` 版雜湊對不上 |
+
+#### 左肩 x 是健檢,不是鏡像偵測
+
+結果裡的 `left_shoulder_x` 應該接近 **+0.5**。這個值用來確認 **219 維組裝與肩寬正規化沒寫錯**。
+
+它**不能**用來判斷影片是否鏡像:姿態模型會依身體外觀判斷解剖左右,
+看到鏡像的人時會把左右標記一起翻過來,於是這個值兩種情況都是正的。
+實測四支示範影片,翻轉與不翻轉量到的都是 +0.49x。
+
+真的拿到自拍鏡像影片時,要在**送進 MediaPipe 之前**把畫面轉正
+(`analyze_video(..., selfie_flip=True)`)。事後修座標並不等價——
+偵測器已經看過鏡像的人了。
+
 ---
 
 ## 4. 公開模型
@@ -544,7 +573,28 @@ python scripts/build_knee42_transformer_bundle.py \
 
 ---
 
-## 5. 重現訓練環境
+## 5. 怎麼跑起來
+
+### 5.0 三個入口
+
+| 入口 | 用途 | 需要 |
+|---|---|---|
+| [`webservice/`](webservice/) | 瀏覽器測試站:攝影機、上傳影片、貼連結 | Python 3.12、`.task` 模型 |
+| [`scripts/analyze_knee42_video.py`](scripts/analyze_knee42_video.py) | 單支影片辨識(CLI) | 同上 |
+| `recognition.realtime.knee42_ivcam` | Windows 即時辨識(legacy BiGRU 路徑) | v11 bundle |
+
+最快的驗證方式是開網頁測試站:
+
+```bash
+python -m webservice.server --port 8642
+```
+
+瀏覽器開 `https://<主機>:8642`(**必須 https**,攝影機 API 只在安全來源啟用)。
+攝影機模式的 MediaPipe **在瀏覽器裡跑,只有骨架座標會送到伺服器,畫面不外傳**。
+設定與限制見 [`webservice/README.md`](webservice/README.md)。
+
+> ⚠️ 測試站**沒有身分驗證**,任何連得到該 port 的人都能使用。請綁在受信任網段,
+> 或放在會做驗證的反向代理後面。
 
 ### 5.1 環境
 
@@ -612,6 +662,35 @@ manifest 的欄位規格見 [`docs/schema/manifest_schema.md`](docs/schema/manif
 
 ### 5.4 執行訓練
 
+#### Transformer(現行路徑)
+
+```bash
+# 一次留一簽者
+python scripts/train_knee42_transformer.py --data-root <features> \
+    --mode loso --test-signer H --seed 7 --encoder <moc_encoder.pt>
+
+# 產生 §2.2 那張表的完整 sweep（4 簽者 × 3 種子）
+python scripts/train_knee42_transformer.py --data-root <features> \
+    --mode loso --test-signer H L P X --seed 7 42 2026 \
+    --encoder <moc_encoder.pt> --results runs/loso_results.jsonl
+
+# 發布模型：全部簽者，沒有保留分數
+python scripts/train_knee42_transformer.py --data-root <features> \
+    --mode final --seed 42 --save artifacts/knee42_transformer_final.pt
+```
+
+`--data-root` 指向含 `research_manifest.csv` 與 `features_final/` 的目錄。
+**訓練全程不碰原始影片。**
+
+[`recognition/training/knee42_transformer.py`](recognition/training/knee42_transformer.py)
+直接 import `recognition.transformer` 的特徵管線與模型定義,不另外複製一份——
+訓練端與部署端各留一份實作,正是兩者悄悄分岔的典型原因。
+
+`--mode final` 回傳的 `val_macro_mixed` 帶著 `warning` 欄位,並且不含 `test` 欄位:
+那個數字**不是**保留估計,理由見 §2.3。
+
+#### Legacy BiGRU
+
 ```python
 import csv, json
 from pathlib import Path
@@ -667,6 +746,16 @@ train_dev_only(
 Round 3–10 雖有更高的 Dev 分數，但違反已凍結的 64 幀輸入契約，依規則不具入選資格。此為刻意的取捨：契約凍結後不得為了追分而更動，否則即時端與訓練端會失去一致性。
 
 ### 5.6 測試
+
+```bash
+python -m pytest tests/ -q
+```
+
+目前 230 項,涵蓋特徵合約、bundle 完整性與竄改偵測、切段邏輯、
+訓練協定(留一簽者是否真的把該簽者排除、發布模型是否拒絕宣稱保留分數)、
+web service 的 multipart 與 payload 解析,以及封裝與敏感資訊掃描。
+
+
 
 ```powershell
 python -m unittest discover -s tests -p "test_knee42*.py" -v

@@ -13,7 +13,18 @@
 - 新增 `scripts/aggregate_knee42_loso_runs.py`，README 的成績表全部由原始訓練 log 重算
 - 新增 `scripts/build_knee42_transformer_bundle.py`，bundle 可重建並比對雜湊
 - 移植後的推論路徑與上游參考實作在 300 筆特徵樣本上逐位元一致
-- 測試由 175 增為 193 項
+- 新增 `recognition/transformer/landmarks.py` 與 `segmentation.py`:離線影片辨識,
+  直接驅動 MediaPipe Tasks,不再需要第三方的 SignAvatar 套件
+- 對齊訓練抽取契約:`RunningMode.IMAGE`、不翻轉畫面、handedness 原樣採用。
+  修正了原本誤用 `RunningMode.VIDEO` 的問題
+- 釐清 `left_shoulder_x` 是正規化健檢而非鏡像偵測;需要轉正的影片改在
+  送進 MediaPipe 前處理(`selfie_flip`)
+- 新增 `webservice/`:瀏覽器測試站,攝影機模式的 MediaPipe 在使用者端執行,
+  只有骨架座標會送到伺服器。自寫串流 multipart 解析,不依賴 Python 3.13 已移除的 `cgi`
+- 新增 `recognition/training/knee42_transformer.py` 與訓練 CLI,
+  直接沿用部署端的特徵管線與模型定義,避免訓練與推論分岔
+- `models/README.md` 記載 `.task` 檔的 SHA-256,並註明必須用 lite 而非 full
+- 測試由 175 增為 230 項
 
 ## v0.1.0
 

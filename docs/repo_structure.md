@@ -14,6 +14,12 @@
 - `evaluation/` — 評估
 - `inference/` — 共用 inference helpers
 
+## webservice
+
+瀏覽器測試站(HTTPS,標準函式庫實作):
+- `server.py` — 靜態檔 + `/predict` + 影片工作佇列
+- `static/index.html` — 單頁介面,MediaPipe 在瀏覽器端執行
+
 ## artifacts
 
 放即時辨識載入的模型 bundle：

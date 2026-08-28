@@ -69,3 +69,10 @@ app_config.local.json
 !artifacts/legacy/daily30_27class/launch_summary.json
 !artifacts/legacy/daily30_27class/fixed_sentence_templates_daily30.csv
 !artifacts/legacy/daily30_27class/best_auto_trigger.json
+
+# web service local state (certificates, vendored MediaPipe web assets, uploads)
+webservice/certs/
+webservice/vendor/
+webservice/uploads/
+webservice/*.log
+webservice/*.pid
