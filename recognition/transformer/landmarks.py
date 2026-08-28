@@ -104,7 +104,11 @@ class MediaPipeLandmarkExtractor:
 
         for name, path in (("hand", hand_model), ("pose", pose_model)):
             if not Path(path).is_file():
-                raise FileNotFoundError(f"{name} landmarker model not found: {path}")
+                raise FileNotFoundError(
+                    f"{name} landmarker model not found: {path}\n"
+                    "  These are not redistributed here; fetch and verify them with:\n"
+                    "    python scripts/fetch_mediapipe_models.py"
+                )
 
         # IMAGE mode, not VIDEO: the feature cache, the data validator and the
         # realtime path all detect frame-by-frame with no temporal tracking, so
