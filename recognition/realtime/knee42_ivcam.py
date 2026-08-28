@@ -13,7 +13,7 @@ from typing import Any, Callable, Sequence
 import numpy as np
 import torch
 
-from recognition.inference.daily30_sentence_model_utils import BiGRUSentenceClassifier
+from recognition.inference.bigru_sentence_model import BiGRUSentenceClassifier
 from recognition.realtime.auto_trigger import load_auto_trigger_config
 from recognition.realtime.knee42_capture import open_camera, open_video
 from recognition.realtime.knee42_controllers import AutoKnee42Controller, SlidingController

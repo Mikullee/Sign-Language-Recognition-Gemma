@@ -1,15 +1,13 @@
 # Runtime Artifacts
 
-這裡放即時辨識載入的模型 bundle。目錄分成「現行」與「legacy」兩層，
-兩者的特徵合約不同，**不可互換**。
+這裡放即時辨識載入的模型 bundle。目前只有一個:
 
 ```
 artifacts/
-├── realtime/best_current/     現行：42 類 Transformer（預設路徑）
-└── legacy/daily30_27class/    舊版：27 類 daily30 BiGRU（保留可跑）
+└── realtime/best_current/     42 類 Transformer
 ```
 
-## `realtime/best_current/` — 現行 bundle
+## `realtime/best_current/`
 
 42 類 Knee42 Transformer，由
 [`recognition.transformer.recognizer`](../recognition/transformer/recognizer.py) 載入。
@@ -50,20 +48,11 @@ python scripts/build_knee42_transformer_bundle.py \
 從原始訓練 log 重算，存放於
 [`docs/evaluation/knee42_loso_metrics.json`](../docs/evaluation/knee42_loso_metrics.json)。
 
-## `legacy/daily30_27class/` — 舊版 bundle
-
-v0.1.0 時期的 27 類固定句型 BiGRU（`T01`–`T30`，不含 `T09`/`T24`/`T26`），
-由 `recognition.realtime.realtime_infer_daily30_sentence` 載入。
-
-保留原因是 auto-trigger 的離線邊界評估與 Windows 打包流程仍以它為對照基準。
-**它不是目前的辨識模型**：其 `train_summary_v1.json` 記錄的 `best_dev_top1`
-為 0.418，類別集合與 42 類 Knee42 也完全不同。
-
 ## 路徑覆寫
 
 | 環境變數 | 覆寫對象 |
 |---|---|
-| `SLR_RUNTIME_BUNDLE_DIR` | 現行 bundle 位置 |
-| `SLR_LEGACY_BUNDLE_DIR` | legacy bundle 位置 |
+| `SLR_RUNTIME_BUNDLE_DIR` | bundle 位置 |
+| `SLR_MODELS_DIR` | MediaPipe `.task` 位置 |
 
 未設定時的預設值見 [`recognition/config.py`](../recognition/config.py)。

@@ -23,8 +23,7 @@
 ## artifacts
 
 放即時辨識載入的模型 bundle：
-- `realtime/best_current/` — 現行 42 類 Transformer bundle
-- `legacy/daily30_27class/` — 舊版 27 類 bundle（保留可跑）
+- `realtime/best_current/` — 42 類 Transformer bundle（唯一的 runtime bundle）
 
 細節見 [`artifacts/README.md`](../artifacts/README.md)。
 

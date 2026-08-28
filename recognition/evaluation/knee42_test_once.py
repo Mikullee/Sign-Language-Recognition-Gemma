@@ -15,7 +15,7 @@ from recognition.evaluation.knee42_selection import (
     sha256_file,
     verify_selection,
 )
-from recognition.inference.daily30_sentence_model_utils import BiGRUSentenceClassifier
+from recognition.inference.bigru_sentence_model import BiGRUSentenceClassifier
 from recognition.training.train_knee42_bigru import (
     LABELS,
     Knee42Dataset,

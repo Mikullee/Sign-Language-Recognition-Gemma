@@ -11,13 +11,11 @@ import numpy as np
 
 from recognition.evaluation.eval_auto_trigger_boundaries import (
     CandidateEvaluation,
-    ClassificationComparison,
     VideoAnnotation,
     VideoBoundaryMetrics,
     VideoLandmarkCache,
     calibrate_auto_trigger,
     choose_best_candidate,
-    classify_manual_and_auto_crops,
     detect_cached_segments,
     evaluate_video_boundaries,
     install_best_config_if_passed,
@@ -111,14 +109,12 @@ class AnnotationTests(unittest.TestCase):
                 "three_videos.csv",
                 "--out-dir",
                 "results",
-                "--skip-classification",
                 "--skip-debug-videos",
             ]
         )
 
         self.assertEqual(args.annotations, "three_videos.csv")
         self.assertEqual(args.out_dir, "results")
-        self.assertTrue(args.skip_classification)
         self.assertTrue(args.skip_debug_videos)
 
 
@@ -261,39 +257,6 @@ class LandmarkCacheTests(unittest.TestCase):
         np.testing.assert_array_equal(first.timestamps_sec, second.timestamps_sec)
 
 
-class ClassificationComparisonTests(unittest.TestCase):
-    def test_manual_correct_auto_wrong_is_segmentation_regression(self):
-        cache = synthetic_cache()
-        annotation = VideoAnnotation(Path("demo.mp4"), "可以", 0.5, 1.2, "")
-
-        comparison = classify_manual_and_auto_crops(
-            cache,
-            annotation,
-            segment(0.4, 1.0),
-            predictor=lambda frames: ("可以", 0.9) if len(frames) >= 7 else ("不可以", 0.8),
-        )
-
-        self.assertTrue(comparison.manual_correct)
-        self.assertFalse(comparison.auto_correct)
-        self.assertTrue(comparison.segmentation_regression)
-        self.assertFalse(comparison.model_issue)
-
-    def test_both_wrong_is_model_issue(self):
-        cache = synthetic_cache()
-        annotation = VideoAnnotation(Path("demo.mp4"), "可以", 0.5, 1.2, "")
-
-        comparison = classify_manual_and_auto_crops(
-            cache,
-            annotation,
-            segment(0.5, 1.2),
-            predictor=lambda frames: ("不知道", 0.7),
-        )
-
-        self.assertFalse(comparison.manual_correct)
-        self.assertFalse(comparison.auto_correct)
-        self.assertTrue(comparison.model_issue)
-
-
 class OutputTests(unittest.TestCase):
     def test_write_outputs_creates_metrics_summary_and_best_config(self):
         annotation = VideoAnnotation(Path("C:/private-host-account/demo.mp4"), "可以", 0.5, 1.2, "")
@@ -303,25 +266,11 @@ class OutputTests(unittest.TestCase):
             tolerance_sec=0.30,
         )
         candidate = CandidateEvaluation(AutoTriggerConfig(end_hold_sec=0.60), [metrics])
-        comparison = ClassificationComparison(
-            video_path=annotation.video_path,
-            expected_label="可以",
-            manual_label="可以",
-            manual_confidence=0.9,
-            auto_label="可以",
-            auto_confidence=0.8,
-            manual_correct=True,
-            auto_correct=True,
-            segmentation_regression=False,
-            model_issue=False,
-        )
-
         with tempfile.TemporaryDirectory() as tmp:
             out_dir = Path(tmp)
             paths = write_evaluation_outputs(
                 out_dir,
                 candidate,
-                comparisons=[comparison],
                 search_metadata={"end_candidates": 243, "start_candidates": 0},
                 tolerance_sec=0.30,
             )
@@ -333,7 +282,7 @@ class OutputTests(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["video_path"], "demo.mp4")
         self.assertTrue(summary["all_videos_passed"])
-        self.assertEqual(summary["classification"]["auto_correct_count"], 1)
+        self.assertNotIn("classification", summary)
         self.assertEqual(config["end_hold_sec"], 0.60)
 
     def test_debug_video_contains_all_source_frames(self):
@@ -366,7 +315,8 @@ class OutputTests(unittest.TestCase):
 
         self.assertEqual(frame_count, 20)
 
-    def test_best_config_installs_only_when_all_videos_pass(self):
+    def test_best_config_installs_only_when_every_video_passes(self):
+        """The gate is boundary-only now; the classifier regression check is gone."""
         annotation = VideoAnnotation(Path("demo.mp4"), "可以", 0.5, 1.2, "")
         passing = CandidateEvaluation(
             AutoTriggerConfig(end_hold_sec=0.60),
@@ -382,56 +332,23 @@ class OutputTests(unittest.TestCase):
             AutoTriggerConfig(end_hold_sec=0.40),
             [VideoBoundaryMetrics.missing(annotation)],
         )
-        passing_comparison = ClassificationComparison(
-            video_path=annotation.video_path,
-            expected_label="可以",
-            manual_label="可以",
-            manual_confidence=0.9,
-            auto_label="可以",
-            auto_confidence=0.8,
-            manual_correct=True,
-            auto_correct=True,
-            segmentation_regression=False,
-            model_issue=False,
-        )
-        regression = ClassificationComparison(
-            video_path=annotation.video_path,
-            expected_label="可以",
-            manual_label="可以",
-            manual_confidence=0.9,
-            auto_label="不可以",
-            auto_confidence=0.8,
-            manual_correct=True,
-            auto_correct=False,
-            segmentation_regression=True,
-            model_issue=False,
-        )
 
         with tempfile.TemporaryDirectory() as tmp:
             destination = Path(tmp) / "best_auto_trigger.json"
-            self.assertIsNone(
-                install_best_config_if_passed(
-                    failing,
-                    destination,
-                    comparisons=[passing_comparison],
-                )
-            )
-            self.assertIsNone(
-                install_best_config_if_passed(
-                    passing,
-                    destination,
-                    comparisons=[regression],
-                )
-            )
-            installed = install_best_config_if_passed(
-                passing,
-                destination,
-                comparisons=[passing_comparison],
-            )
-            payload = json.loads(destination.read_text(encoding="utf-8"))
+            self.assertIsNone(install_best_config_if_passed(failing, destination))
+            self.assertFalse(destination.exists())
 
-        self.assertEqual(installed, destination)
-        self.assertEqual(payload["end_hold_sec"], 0.60)
+            installed = install_best_config_if_passed(passing, destination)
+            self.assertEqual(installed, destination)
+            self.assertEqual(
+                json.loads(destination.read_text(encoding="utf-8"))["end_hold_sec"], 0.60
+            )
+
+    def test_an_empty_candidate_never_installs(self):
+        empty = CandidateEvaluation(AutoTriggerConfig(end_hold_sec=0.60), [])
+        with tempfile.TemporaryDirectory() as tmp:
+            destination = Path(tmp) / "best_auto_trigger.json"
+            self.assertIsNone(install_best_config_if_passed(empty, destination))
 
 
 if __name__ == "__main__":

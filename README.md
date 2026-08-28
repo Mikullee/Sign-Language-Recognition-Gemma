@@ -563,8 +563,7 @@ python scripts/build_knee42_transformer_bundle.py \
 
 ### 4.2 Legacy 模型
 
-27 類 daily30 BiGRU 位於 [`artifacts/legacy/daily30_27class/`](artifacts/legacy/daily30_27class/)。
-42 類 v11 BiGRU 仍由 [Releases](../../releases) 的 `v1.0.0-v13` 提供
+42 類 v11 BiGRU 由 [Releases](../../releases) 的 `v1.0.0-v13` 提供
 （`knee42-model-v11.zip`，SHA-256 `af45a4a50fc67755dd86be1b47fe975120e47a1b9f6850232e294685dd4ac8df`）。
 
 ### 4.3 公開範圍
@@ -587,7 +586,10 @@ python scripts/build_knee42_transformer_bundle.py \
 |---|---|---|
 | [`webservice/`](webservice/) | 瀏覽器測試站:攝影機、上傳影片、貼連結 | Python 3.12、`.task` 模型 |
 | [`scripts/analyze_knee42_video.py`](scripts/analyze_knee42_video.py) | 單支影片辨識(CLI) | 同上 |
-| `recognition.realtime.knee42_ivcam` | Windows 即時辨識(legacy BiGRU 路徑) | v11 bundle |
+| `recognition.realtime.knee42_ivcam` | 相機即時辨識(**legacy BiGRU**,非現行模型) | 自備 v11 bundle + `.task` |
+
+> 目前**沒有跑 Transformer 的即時程式**。27 類 daily30 子系統於 v12 移除時,
+> Windows 可攜版一併停止;Transformer 的即時入口尚未撰寫。要即時操作請用網頁測試站的攝影機模式。
 
 最快的驗證方式是開網頁測試站:
 
@@ -630,7 +632,7 @@ conda activate knee42-train
 python -m pip install -r requirements.lock.txt
 ```
 
-`requirements.lock.txt` 是目前發布模型的 Linux／CUDA 精確套件版本快照，不適用於 Windows 推論環境。`environment.yml` 僅供快速建立未完全鎖版的基礎環境；如使用該檔，環境名稱為 `slr_runtime`，仍須再安裝 `requirements.lock.txt` 才能對齊訓練版本。`requirements-windows.txt` 僅記錄來源層級推論所需套件；公開 Release 不含完整即時執行資產。
+`requirements.lock.txt` 是目前發布模型的 Linux／CUDA 精確套件版本快照，不適用於 Windows 推論環境。`environment.yml` 僅供快速建立未完全鎖版的基礎環境；如使用該檔，環境名稱為 `slr_runtime`，仍須再安裝 `requirements.lock.txt` 才能對齊訓練版本。現行 Transformer 推論路徑的版本組合見 `requirements-transformer.txt`（Python 3.12、純 CPU、已實測）。
 
 ### 5.2 資料取得
 
@@ -907,13 +909,24 @@ Train/Dev 影片稽核結果：獨立列 2,252（Train 1,634、Dev 618），最�
 
 repository 保留兩份已被取代但仍可執行的資產，**兩者都不是目前的辨識模型**：
 
-| 資產 | 位置 | 說明 |
-|---|---|---|
-| 27 類 daily30 BiGRU | [`artifacts/legacy/daily30_27class/`](artifacts/legacy/daily30_27class/) | v0.1.0 時期的固定句型模型（`T01`–`T30`，不含 `T09`/`T24`/`T26`），`best_dev_top1` 0.418。auto-trigger 的離線邊界評估仍以它為對照基準。 |
-| 27 類版本文件 | [`docs/legacy/`](docs/legacy/) | v0.1.0 的說明與快速開始 |
-| 42 類 v11 BiGRU | Release `v1.0.0-v13` | 上一代 42 類模型，指標見 §2.5 |
+### 保留的:42 類 v11 BiGRU
 
-**這三者的類別集合與特徵合約各不相同，checkpoint 不可互換。**
-載入時的 `feature_config.json` 驗證會擋下錯配，不會靜默地跑出錯誤結果——
-這正是先前 `artifacts/realtime/best_current/` 裡放著 27 類模型、
-文件卻描述 42 類系統的問題所要避免的。
+上一代模型,指標見 §2.5,由 Release `v1.0.0-v13` 提供（不在 repository 內）。
+程式碼路徑保留在 `recognition/realtime/knee42_ivcam.py`,可載入該 bundle 執行。
+
+它與現行 Transformer 的**特徵合約不同**（`64 × 438` vs `64 × 657`），
+**checkpoint 不可互換**。兩邊載入時都會驗證 `feature_config.json`,
+錯配會直接拒絕啟動,不會靜默跑出錯誤結果。
+
+### 已移除的:27 類 daily30 子系統
+
+v0.1.0 時期的固定句型模型（`T01`–`T30`）與其整套程式碼已於 v12 移除,
+包含即時推論、訓練、評估、Windows 打包與 27 類 bundle。
+
+移除理由:`best_dev_top1` 僅 **0.418**,類別集合與 42 類 Knee42 完全無關,
+留著只會讓「repository 裡到底哪顆才是模型」這個問題繼續存在——
+那正是先前 `artifacts/realtime/best_current/` 裡放著 27 類模型、
+文件卻描述 42 類系統的根源。
+
+**副作用:目前沒有 Windows 可攜版可打包。** 該版本的進入點就是 27 類 app,
+Transformer 的即時程式尚未撰寫。現階段請改用網頁測試站或 CLI（§5.0）。

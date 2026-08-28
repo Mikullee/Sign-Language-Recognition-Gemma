@@ -28,9 +28,6 @@
 
 Legacy：
 
-- `recognition/training/train_daily30_sentence_bigru.py`
-- `recognition/evaluation/eval_daily30_sentence_bigru.py`
-- `recognition/realtime/realtime_infer_daily30_sentence.py`
-- `recognition/inference/daily30_sentence_feature_utils.py`
-- `recognition/inference/daily30_sentence_model_utils.py`
-- `recognition/inference/build_daily30_sentence_manifest.py`
+- `recognition/realtime/knee42_ivcam.py` — legacy BiGRU 即時辨識
+- `recognition/training/knee42_devonly.py` — legacy BiGRU 訓練
+- `recognition/inference/bigru_sentence_model.py` — legacy BiGRU 分類器定義

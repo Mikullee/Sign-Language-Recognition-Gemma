@@ -1,22 +1,6 @@
 # Quick Start
 
-## Windows 可攜版
-
-1. 解壓 `SignLanguageRecognition-v0.1.0-windows-x64.zip`。
-2. 啟動 iVCam，確認手機畫面已出現在 Windows。
-3. 執行 `start_ivcam.cmd`。
-4. 站在鏡頭前，讓上半身與雙手腕完整入鏡，雙手自然垂放身側。
-5. 完成一句後將雙手放回身側；約 0.5 秒確認後會顯示結果並準備下一句。
-
-Auto 模式不使用 Space 切段。`Q` 離開、`R` 重設、`S` 立即儲存日誌。
-
-若 iVCam 不是攝影機 0，可編輯 `app_config.json` 的 `source`，或執行：
-
-```powershell
-SignLanguageRecognition.exe --source 1 --backend dshow
-```
-
-## 原始碼執行
+## 安裝
 
 ```powershell
 git clone https://github.com/Mikullee/Sign-Language-Recognition-Gemma.git
@@ -26,32 +10,51 @@ conda activate knee42
 python -m pip install -r requirements-transformer.txt
 ```
 
-現行 42 類 Transformer 的 bundle 已附在 `artifacts/realtime/best_current/`，
-可先確認它通過完整性驗證：
+42 類 Transformer 的 bundle 已附在 `artifacts/realtime/best_current/`，
+先確認它通過完整性驗證：
 
 ```powershell
 python -c "from recognition.transformer.recognizer import Knee42TransformerRecognizer as R; r = R('artifacts/realtime/best_current'); print(len(r.labels), '類載入成功')"
 ```
 
-### Legacy 27 類即時推論
+再把兩個 MediaPipe `.task` 放進 `models/`（repository 不散布，雜湊見
+[`models/README.md`](../models/README.md)）。**pose 必須是 lite 版。**
+
+## 用網頁測試站
 
 ```powershell
-conda env create -f environment.yml
-conda activate slr_runtime
-python -m recognition.realtime.realtime_infer_daily30_sentence
+python -m webservice.server --port 8642
 ```
 
-CLI 會覆寫 `app_config.json`：
+瀏覽器開 `https://<主機>:8642`——**必須 https**，攝影機 API 只在安全來源啟用。
+第一次會跳自簽憑證警告，進階 → 繼續前往。
+
+- **攝影機**：按住空白鍵錄 1–3 秒，放開出結果。MediaPipe 在瀏覽器端跑，畫面不外傳。
+- **上傳影片**：≤ 200 MB／≤ 180 秒，自動切段，每段給 top-3。
+- 比劃時**兩邊肩膀都要在畫面內**（要靠雙肩做正規化）。
+
+攝影機模式另需 MediaPipe 的網頁資產，設定見 [`webservice/README.md`](../webservice/README.md)。
+
+## 用 CLI 辨識單支影片
 
 ```powershell
-python -m recognition.realtime.realtime_infer_daily30_sentence `
-  --source 1 `
-  --backend dshow `
-  --trigger-mode auto `
-  --save-log
+python scripts/analyze_knee42_video.py <影片路徑>
 ```
 
-手動切段仍可用 `--trigger-mode manual`，此模式才會顯示 Space 操作提示。
+自拍鏡像的影片加 `--selfie-flip`——必須在偵測前把畫面轉正，事後修座標不等價。
+
+## Legacy 42 類 BiGRU
+
+`recognition/realtime/knee42_ivcam.py` 需要自備 v11 bundle
+（Release `v1.0.0-v13`）與兩個 MediaPipe `.task`，`--bundle` 為必填：
+
+```powershell
+python -m recognition.realtime.knee42_ivcam --bundle <v11-bundle-dir>
+```
+
+> **沒有 Windows 可攜版。** 原本的可攜版打包的是 27 類 daily30 app，
+> 該子系統已於 v12 移除；Transformer 的即時程式尚未撰寫。
+> 要即時操作請用網頁測試站的攝影機模式。
 
 ## 重新校準自動起訖
 
@@ -62,4 +65,5 @@ python -m recognition.evaluation.eval_auto_trigger_boundaries `
   --annotations data/annotations/auto_trigger_three_videos.csv
 ```
 
-評估會輸出逐片指標、摘要、最佳設定與 debug 影片。分類結果只用來比較人工與自動裁切，不參與切段參數選擇。
+輸出逐片指標、摘要、最佳設定與 debug 影片。加 `--install-config <path>`
+才會在全數通過時把校準結果寫出去；預設不寫，避免覆蓋被 provenance 雜湊鎖住的設定。

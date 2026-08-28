@@ -24,7 +24,18 @@
 - 新增 `recognition/training/knee42_transformer.py` 與訓練 CLI,
   直接沿用部署端的特徵管線與模型定義,避免訓練與推論分岔
 - `models/README.md` 記載 `.task` 檔的 SHA-256,並註明必須用 lite 而非 full
-- 測試由 175 增為 230 項
+- **移除整個 27 類 daily30 子系統**(23 個檔案):即時推論、訓練、評估、
+  inference helpers、27 類 bundle、Windows 打包與進入點。理由是該模型
+  `best_dev_top1` 僅 0.418,類別集合與 42 類 Knee42 無關,留著只會讓
+  「哪一顆才是模型」持續混淆
+- **副作用:Windows 可攜版停止**。其進入點就是 27 類 app,Transformer 的
+  即時程式尚未撰寫;現階段改用網頁測試站或 CLI
+- `daily30_sentence_model_utils.py` 更名為 `bigru_sentence_model.py`——
+  它其實是 legacy **Knee42** BiGRU 的分類器,原檔名有誤導性
+- auto-trigger 邊界校準工具保留,但拿掉綁死 daily30 的分類對照;
+  225 維 trigger 向量改由共用的 `knee42_preprocessing` 提供(已驗證兩者輸出完全相同)。
+  **`install_best_config_if_passed` 的門檻因此變寬**:不再檢查分類回歸,只看邊界是否全數通過
+- 測試由 175 增為 221 項
 
 ## v0.1.0
 

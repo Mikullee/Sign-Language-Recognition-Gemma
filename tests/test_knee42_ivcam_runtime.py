@@ -12,7 +12,7 @@ import numpy as np
 import torch
 import recognition.realtime.knee42_ivcam as knee42_ivcam
 
-from recognition.inference.daily30_sentence_model_utils import BiGRUSentenceClassifier
+from recognition.inference.bigru_sentence_model import BiGRUSentenceClassifier
 from recognition.realtime.knee42_ivcam import (
     InferenceResult,
     IntegrityError,

@@ -3,7 +3,8 @@
 目前的辨識模型為 **42 類 Transformer（v12）**，應用層封裝仍為 `v0.1.0`。核心流程已完成：
 
 - 42 類 Transformer runtime bundle，以 SHA-256 逐檔驗證後載入
-- 27 類 daily30 BiGRU 與 42 類 v11 BiGRU 保留為 legacy（見 README「Legacy」）
+- 42 類 v11 BiGRU 保留為 legacy（Release 提供，見 README「Legacy」）
+- 27 類 daily30 子系統已於 v12 整套移除，Windows 可攜版隨之停止
 - MediaPipe pose/hand 特徵抽取
 - 共用的秒制 auto-trigger 狀態機
 - 三支標註影片的自動起訖離線校準與 debug 輸出
@@ -11,7 +12,7 @@
 - 完全離線載入，不含 SSH 主機、帳號、密碼或自動下載
 - Windows x64 PyInstaller `onedir` 打包設定
 
-`T09 我聽不懂` 不在 legacy 27 類模型的標籤中；現行 42 類模型則包含 `K42_09 我聽不懂`。
+現行 42 類模型包含 `K42_09 我聽不懂`。
 
 已知限制：
 
