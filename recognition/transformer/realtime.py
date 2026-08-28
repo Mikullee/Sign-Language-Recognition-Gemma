@@ -66,6 +66,7 @@ from recognition.transformer.recognizer import Knee42TransformerRecognizer
 DEFAULT_TRIGGER_CONFIG = Path("configs") / "auto_trigger_knee_v1.json"
 DEFAULT_FRAME_STEP = 2
 MIN_SEGMENT_FRAMES = 4
+DEFAULT_FIRST_FRAME_TIMEOUT = 10.0
 
 
 @dataclass
@@ -176,6 +177,49 @@ class Detectors:
         )
 
 
+class NoFramesError(RuntimeError):
+    """The source opened but never delivered a frame."""
+
+
+def read_first_frame(source: Any, *, timeout_sec: float = DEFAULT_FIRST_FRAME_TIMEOUT):
+    """Read one frame, refusing to wait forever for a camera that never starts.
+
+    ``VideoCapture.read`` blocks, so a camera another process is holding will
+    hang the whole program with no window and no output -- which looks exactly
+    like a crash. Doing the first read on a worker thread turns that into a
+    message that says what to do about it.
+    """
+    import threading
+
+    outcome: dict[str, Any] = {}
+
+    def attempt() -> None:
+        try:
+            ok, frame = source.read()
+            outcome["frame"] = frame if ok else None
+        except Exception as exc:  # noqa: BLE001 - reported to the caller below
+            outcome["error"] = exc
+
+    worker = threading.Thread(target=attempt, daemon=True)
+    worker.start()
+    worker.join(timeout_sec)
+
+    if worker.is_alive():
+        raise NoFramesError(
+            f"{source.status} produced no frame within {timeout_sec:.0f}s.\n"
+            "  Another process is usually holding the camera. Close any other session\n"
+            "  of this program (and any app using the webcam), then retry."
+        )
+    if "error" in outcome:
+        raise NoFramesError(f"{source.status} failed to read: {outcome['error']}")
+    if outcome.get("frame") is None:
+        raise NoFramesError(
+            f"{source.status} opened but returned no image.\n"
+            "  The camera index may be wrong; try --camera 1."
+        )
+    return outcome["frame"]
+
+
 def sequence_from_features(features: Sequence[Any]) -> np.ndarray:
     """Stack a segment's (values, mask) pairs into the ``[frames, 219]`` input.
 
@@ -195,6 +239,7 @@ def recognize_stream(
     frame_step: int = DEFAULT_FRAME_STEP,
     topk: int = 3,
     max_frames: int | None = None,
+    first_frame_timeout_sec: float = DEFAULT_FIRST_FRAME_TIMEOUT,
     on_result: Any = None,
     on_state: Any = None,
     on_frame: Any = None,
@@ -213,9 +258,13 @@ def recognize_stream(
     results: list[Recognition] = []
     previous_state = ""
     latest: Recognition | None = None
+    first = read_first_frame(source, timeout_sec=first_frame_timeout_sec)
 
     while True:
-        ok, frame = source.read()
+        if first is not None:
+            ok, frame, first = True, first, None
+        else:
+            ok, frame = source.read()
         if not ok:
             break
         raw_frames += 1
@@ -433,6 +482,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     except KeyboardInterrupt:
         print("\n[exit] stopped")
         return 0
+    except NoFramesError as exc:
+        print(f"\n[error] {exc}", flush=True)
+        return 1
     finally:
         source.release()
         if preview is not None:
