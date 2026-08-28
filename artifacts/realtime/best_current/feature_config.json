@@ -1,0 +1,20 @@
+{
+  "sequence_length": 64,
+  "landmark_value_dim": 219,
+  "input_dim": 657,
+  "channels": [
+    "position",
+    "velocity",
+    "acceleration"
+  ],
+  "knee_indices_removed": [
+    25,
+    26
+  ],
+  "mask_concatenated": false,
+  "standardizer": null,
+  "missing_values": "linear_interpolation",
+  "features_final": "knee42_features_upright_v2",
+  "horizontal_mirror": false,
+  "note": "Velocity and acceleration are first-order differences taken after resampling to 64 frames, so they are per resampled frame."
+}

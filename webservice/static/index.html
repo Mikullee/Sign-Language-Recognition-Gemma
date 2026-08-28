@@ -1,0 +1,749 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Knee42 台灣手語辨識測試</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='13' font-size='13'>%F0%9F%91%8B</text></svg>">
+<style>
+  :root{
+    --bg:#0e1116; --panel:#161b22; --line:#2a323d; --fg:#e6edf3; --dim:#8b96a5;
+    --accent:#4fd8e8; --accent2:#ffb454; --ok:#3fb950; --err:#f85149;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);
+       font-family:system-ui,-apple-system,"Noto Sans TC","PingFang TC","Microsoft JhengHei",sans-serif;
+       line-height:1.6}
+  header{padding:14px 20px;border-bottom:1px solid var(--line);display:flex;
+         align-items:baseline;gap:14px;flex-wrap:wrap}
+  header h1{font-size:18px;margin:0;font-weight:600}
+  header .sub{color:var(--dim);font-size:13px}
+  main{display:grid;grid-template-columns:minmax(0,1.3fr) minmax(340px,1fr);
+       gap:18px;padding:18px 20px;max-width:1500px;margin:0 auto}
+  @media (max-width:980px){main{grid-template-columns:1fr}}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px}
+  .panel h2{font-size:14px;margin:0 0 10px;color:var(--dim);font-weight:600;letter-spacing:.04em}
+
+  /* 分頁 */
+  .tabs{display:flex;gap:6px;margin-bottom:14px;flex-wrap:wrap}
+  .tabs button{padding:8px 15px;border-radius:8px;background:#1a212b;color:var(--dim);
+               border:1px solid var(--line)}
+  .tabs button.on{background:var(--accent);color:#06222a;border-color:transparent;font-weight:600}
+  .pane{display:none} .pane.on{display:block}
+
+  #stage{position:relative;background:#000;border-radius:10px;overflow:hidden;aspect-ratio:16/9}
+  #view{width:100%;height:100%;display:block}
+  #badge{position:absolute;top:10px;left:10px;background:rgba(0,0,0,.62);
+         padding:4px 10px;border-radius:999px;font-size:12px;color:var(--dim)}
+  #badge.rec{color:#fff;background:rgba(248,81,73,.85);font-weight:600}
+  #overlay-msg{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
+       text-align:center;padding:24px;color:var(--dim);font-size:14px;background:rgba(0,0,0,.5)}
+  #overlay-msg.hide{display:none}
+
+  .controls{display:flex;gap:10px;align-items:center;margin-top:12px;flex-wrap:wrap}
+  button{font:inherit;border-radius:9px;border:1px solid var(--line);background:#1f2630;
+         color:var(--fg);padding:9px 16px;cursor:pointer}
+  button:hover:not(:disabled){border-color:#3d4757}
+  button:disabled{opacity:.45;cursor:not-allowed}
+  .big{flex:1;min-width:210px;padding:16px;font-size:17px;font-weight:600;
+       background:var(--accent);color:#06222a;border-color:transparent}
+  .big.on{background:var(--err);color:#fff}
+  .big:disabled{background:#1f2630;color:var(--dim)}
+  input[type=text],input[type=file]{font:inherit;width:100%;padding:11px 13px;border-radius:9px;
+       border:1px solid var(--line);background:#0d1117;color:var(--fg)}
+  input[type=file]{padding:9px}
+  label.fld{display:block;font-size:13px;color:var(--dim);margin:12px 0 6px}
+
+  #status{margin-top:10px;font-size:12.5px;color:var(--dim);
+          display:flex;gap:16px;flex-wrap:wrap;font-variant-numeric:tabular-nums}
+  #status b{color:var(--fg);font-weight:600}
+  .msg{margin-top:10px;font-size:13px;min-height:20px}
+  .msg.err{color:var(--err)} .msg.ok{color:var(--ok)} .msg.hint{color:var(--dim)}
+
+  .prog{margin-top:14px;display:none}
+  .prog.on{display:block}
+  .prog .track{height:8px;background:#0d1117;border-radius:999px;overflow:hidden;
+               border:1px solid var(--line)}
+  .prog .fill{height:100%;background:linear-gradient(90deg,var(--accent),var(--accent2));
+              width:0%;transition:width .3s}
+  .prog .lbl{font-size:12.5px;color:var(--dim);margin-top:6px;font-variant-numeric:tabular-nums}
+
+  .bar{margin-bottom:9px}
+  .bar .top{display:flex;justify-content:space-between;gap:10px;font-size:14px;margin-bottom:3px}
+  .bar .txt{font-weight:600}
+  .bar .pct{color:var(--dim);font-variant-numeric:tabular-nums}
+  .bar .track{height:9px;background:#0d1117;border-radius:999px;overflow:hidden}
+  .bar .fill{height:100%;background:var(--accent);border-radius:999px;transition:width .25s}
+  .bar:first-child .fill{background:linear-gradient(90deg,var(--accent),var(--accent2))}
+  .bar.dim .txt{color:var(--dim);font-weight:400}
+  .hint{color:var(--dim);font-size:13px}
+  #verdict{font-size:13px;margin-bottom:12px;padding:9px 11px;border-radius:8px;
+           background:#0d1117;border:1px solid var(--line)}
+  #meta,#vmeta{margin-top:12px;font-size:12px;color:var(--dim);font-variant-numeric:tabular-nums}
+  kbd{background:#0d1117;border:1px solid var(--line);border-bottom-width:2px;
+      border-radius:5px;padding:1px 6px;font-size:12px;font-family:ui-monospace,monospace}
+
+  .tblwrap{overflow-x:auto}
+  table{border-collapse:collapse;width:100%;font-size:13px}
+  th,td{text-align:left;padding:7px 9px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{color:var(--dim);font-weight:600;font-size:12px;white-space:nowrap}
+  td.num{font-variant-numeric:tabular-nums;white-space:nowrap;color:var(--dim)}
+  td.top1{font-weight:600}
+  .pill{display:inline-block;background:#0d1117;border:1px solid var(--line);
+        border-radius:999px;padding:1px 9px;margin:2px 4px 2px 0;font-size:12px}
+  .pill b{color:var(--accent)}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Knee42 台灣手語辨識測試</h1>
+  <span class="sub" id="subline">42 類詞句 · 攝影機 / 上傳影片 / 影片連結</span>
+  <span style="margin-left:auto;font-size:13px;opacity:.7">42 類詞句</span>
+  <button id="vocab-toggle" style="margin-left:10px;background:none;border:1px solid var(--line);
+    color:var(--fg);border-radius:6px;padding:4px 12px;cursor:pointer;font-size:13px">
+    📖 可辨識詞彙</button>
+</header>
+<div id="vocab-panel" style="display:none;padding:14px 20px;border-bottom:1px solid var(--line)">
+  <div style="font-size:13px;color:var(--dim);margin-bottom:8px">
+    模型只認得以下 42 個詞句；範圍外的手語會顯示低信心（&lt;0.5 建議視為「無法辨識」）。</div>
+  <div id="vocab-place" style="margin-bottom:6px"></div>
+  <div id="vocab-word"></div>
+</div>
+<script>
+(function(){
+  let model = "knee42";
+  window.currentModel = () => "knee42";
+  const btn = document.getElementById("vocab-toggle");
+  const panel = document.getElementById("vocab-panel");
+  let loadedFor = null;
+  const PLACES = new Set(["台北","新北","桃園","新竹","苗栗","台中","彰化","南投","雲林",
+    "嘉義","台南","高雄","屏東","宜蘭","花蓮","台東","澎湖","基隆","金門","馬祖","新竹市","嘉義市"]);
+  function chip(t, label){
+    return `<span title="${label}" style="display:inline-block;margin:3px;padding:3px 10px;`+
+      `border:1px solid var(--line);border-radius:14px;font-size:13.5px">${t}</span>`;
+  }
+  async function loadVocab(){
+    if (loadedFor === model) return;
+    try {
+      const r = await fetch("/labels"); const j = await r.json();
+      const place = [], word = [];
+      for (const it of j.labels) (PLACES.has(it.text) ? place : word).push(it);
+      document.getElementById("vocab-place").innerHTML = place.length ?
+        `<b style="font-size:13px">地名（${place.length}）</b><br>` +
+        place.map(it => chip(it.text, it.label)).join("") : "";
+      document.getElementById("vocab-word").innerHTML =
+        `<b style="font-size:13px">詞彙（${word.length}）</b><br>` +
+        word.map(it => chip(it.text, it.label)).join("");
+      btn.textContent = `📖 可辨識詞彙（${j.labels.length}）`;
+      loadedFor = model;
+    } catch (e) {
+      document.getElementById("vocab-word").textContent = "載入失敗：" + e;
+    }
+  }
+  btn.addEventListener("click", () => {
+    panel.style.display = panel.style.display === "none" ? "block" : "none";
+    if (panel.style.display !== "none") loadVocab();
+  });
+  // 模型切換器已移除：這個 bundle 只提供 42 類詞句模型。
+})();
+</script>
+
+<main>
+  <!-- ══════ 左：輸入 ══════ -->
+  <section class="panel">
+    <div class="tabs">
+      <button id="tab-cam" class="on">📷 攝影機</button>
+      <button id="tab-up">⬆️ 上傳影片</button>
+      <button id="tab-url">🔗 影片連結</button>
+    </div>
+
+    <!-- 攝影機 -->
+    <div class="pane on" id="pane-cam">
+      <div id="stage">
+        <canvas id="view"></canvas>
+        <div id="badge">未啟動</div>
+        <div id="overlay-msg">按下方「啟動鏡頭」開始</div>
+      </div>
+      <div class="controls">
+        <button id="rec-btn" class="big" disabled>啟動鏡頭</button>
+        <button id="cam-btn">關閉鏡頭</button>
+        <span id="mode-switch" style="margin-left:auto;display:inline-flex;
+          border:1px solid var(--line);border-radius:8px;overflow:hidden;font-size:13px">
+          <button data-mode="manual" class="msw on" style="border:none;padding:7px 14px;
+            cursor:pointer;background:var(--accent);color:#08201c;font-weight:600">手動</button>
+          <button data-mode="auto" class="msw" style="border:none;padding:7px 14px;
+            cursor:pointer;background:none;color:var(--fg)">自動偵測</button>
+        </span>
+      </div>
+      <div id="status">
+        <span>FPS <b id="s-fps">—</b></span>
+        <span>偵測到的手 <b id="s-hands">—</b></span>
+        <span>上半身 <b id="s-pose">—</b></span>
+        <span>鏡像判定 <b id="s-mirror">—</b></span>
+      </div>
+      <div id="cam-msg" class="msg hint">
+        按住 <kbd>空白鍵</kbd> 錄影、放開結束；或直接點大按鈕開始／停止。
+        比劃時請讓<b>兩邊肩膀</b>都在畫面內。
+      </div>
+    </div>
+
+    <!-- 上傳影片 -->
+    <div class="pane" id="pane-up">
+      <p class="hint">選一支手語影片上傳，伺服器會跑完整支 MediaPipe 追蹤、依動作停頓自動切段，逐段給 top-3。</p>
+      <label class="fld">影片檔（≤ <span id="lim-mb">200</span> MB、≤ <span id="lim-sec">180</span> 秒）</label>
+      <input type="file" id="up-file" accept="video/*">
+      <div class="controls">
+        <button id="up-btn" class="big">開始辨識</button>
+      </div>
+      <div class="prog" id="up-prog">
+        <div class="track"><div class="fill"></div></div>
+        <div class="lbl">—</div>
+      </div>
+      <div id="up-msg" class="msg hint"></div>
+    </div>
+
+    <!-- 影片連結 -->
+    <div class="pane" id="pane-url">
+      <p class="hint">貼上影片網址，由伺服器的 yt-dlp 下載。同樣限制 <span id="lim-sec2">180</span> 秒以內。</p>
+      <p class="hint" style="color:var(--accent2)">⚠️ 這台機器的校園網路擋掉了 YouTube 的影片 CDN（googlevideo.com），
+      <b>YouTube 連結會下載失敗</b>；直接指向影片檔的網址（.mp4 / .webm）則可以正常運作。
+      要辨識 YouTube 影片，請先自行下載後改用「上傳影片」模式。</p>
+      <label class="fld">影片網址</label>
+      <input type="text" id="url-input" placeholder="https://www.youtube.com/watch?v=…" spellcheck="false">
+      <div class="controls">
+        <button id="url-btn" class="big">下載並辨識</button>
+      </div>
+      <div class="prog" id="url-prog">
+        <div class="track"><div class="fill"></div></div>
+        <div class="lbl">—</div>
+      </div>
+      <div id="url-msg" class="msg hint"></div>
+    </div>
+  </section>
+
+  <!-- ══════ 右：結果 ══════ -->
+  <section class="panel">
+    <h2 id="res-title">辨識結果 (TOP-5)</h2>
+
+    <div id="res-cam">
+      <div id="verdict" class="hint">尚未辨識。</div>
+      <div id="bars"><span class="hint">—</span></div>
+      <div id="meta"></div>
+    </div>
+
+    <div id="res-video" style="display:none">
+      <div id="vsummary" class="hint">尚未辨識。</div>
+      <div id="vwhole"></div>
+      <div class="tblwrap"><table id="vtable"></table></div>
+      <div id="vmeta"></div>
+    </div>
+  </section>
+</main>
+
+<script type="module">
+import { FilesetResolver, HandLandmarker, PoseLandmarker }
+  from "./vendor/mediapipe/vision_bundle.mjs";
+
+"use strict";
+
+const $ = id => document.getElementById(id);
+
+/* ══ 分頁切換 ══════════════════════════════════════════ */
+const MODES = ["cam", "up", "url"];
+function showMode(m) {
+  for (const k of MODES) {
+    $("tab-" + k).classList.toggle("on", k === m);
+    $("pane-" + k).classList.toggle("on", k === m);
+  }
+  const isCam = m === "cam";
+  $("res-cam").style.display = isCam ? "" : "none";
+  $("res-video").style.display = isCam ? "none" : "";
+  $("res-title").textContent = isCam ? "辨識結果 (TOP-5)" : "影片辨識結果（逐段 TOP-3）";
+  if (!isCam && camOn) stopCam();          // 切走就關鏡頭，釋放攝影機
+}
+for (const k of MODES) $("tab-" + k).onclick = () => showMode(k);
+
+/* ══ 共用 ══════════════════════════════════════════════ */
+function say(el, text, cls = "hint") { el.className = "msg " + cls; el.innerHTML = text; }
+
+fetch("health").then(r => r.json()).then(h => {
+  $("subline").textContent = `42 類詞句 · 模型已載入 (${h.classes} 類) · `
+    + `影片上限 ${h.max_upload_mb} MB / ${h.max_video_seconds} 秒`
+    + (h.ytdlp ? " · yt-dlp 可用" : " · ⚠ 伺服器無 yt-dlp，影片連結不可用");
+  $("lim-mb").textContent = h.max_upload_mb;
+  $("lim-sec").textContent = h.max_video_seconds;
+  $("lim-sec2").textContent = h.max_video_seconds;
+  if (!h.ytdlp) { $("url-btn").disabled = true; say($("url-msg"), "伺服器上沒有安裝 yt-dlp。", "err"); }
+}).catch(() => say($("cam-msg"), "警告：連不到後端 /health，伺服器可能沒在跑。", "err"));
+
+/* ══════════════ 模式一：攝影機 ══════════════════════════ */
+const video = document.createElement("video");
+video.muted = true; video.playsInline = true;
+const canvas = $("view"), ctx = canvas.getContext("2d");
+const badge = $("badge"), overlay = $("overlay-msg");
+const recBtn = $("rec-btn"), camBtn = $("cam-btn"), camMsg = $("cam-msg");
+
+let handLm = null, poseLm = null;
+let camOn = false, recording = false, busy = false;
+let camMode = "manual";                 // "manual" | "auto"
+let autoBuf = [], autoSending = false, autoT0 = 0, autoSession = "";
+let autoSeen = 0;                       // segments already rendered this session
+let recBuf = [], recStart = 0;
+let lastVideoTime = -1, fpsEMA = 0, lastTick = 0, lastMirror = "—";
+const MAX_SECONDS = 20;
+
+const HAND_EDGES = [[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[5,9],[9,10],
+  [10,11],[11,12],[9,13],[13,14],[14,15],[15,16],[13,17],[0,17],[17,18],[18,19],[19,20]];
+const POSE_EDGES = [[11,12],[11,13],[13,15],[12,14],[14,16],[11,23],[12,24],[23,24]];
+
+async function initModels() {
+  const vision = await FilesetResolver.forVisionTasks("vendor/mediapipe/wasm");
+  const mk = async (delegate) => [
+    await HandLandmarker.createFromOptions(vision, {
+      baseOptions: { modelAssetPath: "vendor/mediapipe/hand_landmarker.task", delegate },
+      runningMode: "VIDEO", numHands: 2 }),
+    await PoseLandmarker.createFromOptions(vision, {
+      baseOptions: { modelAssetPath: "vendor/mediapipe/pose_landmarker_lite.task", delegate },
+      runningMode: "VIDEO", numPoses: 1 }),
+  ];
+  try { [handLm, poseLm] = await mk("GPU"); }
+  catch (e) { console.warn("GPU delegate 失敗，改用 CPU：", e); [handLm, poseLm] = await mk("CPU"); }
+}
+
+async function startCam() {
+  recBtn.disabled = true;
+  overlay.classList.remove("hide");
+  try {
+    if (!window.isSecureContext) throw new Error("INSECURE");
+    if (!navigator.mediaDevices?.getUserMedia) throw new Error("INSECURE");
+    overlay.textContent = "載入 MediaPipe 模型…";
+    if (!handLm) await initModels();
+    overlay.textContent = "要求攝影機權限…";
+    video.srcObject = await navigator.mediaDevices.getUserMedia({
+      video: { width: { ideal: 960 }, height: { ideal: 540 }, facingMode: "user" }, audio: false });
+    await video.play();
+    canvas.width = video.videoWidth || 960; canvas.height = video.videoHeight || 540;
+    camOn = true;
+    overlay.classList.add("hide");
+    badge.textContent = "待機中";
+    recBtn.disabled = false;
+    recBtn.textContent = "開始錄製（或按住空白鍵）";
+    camBtn.textContent = "關閉鏡頭";
+    say(camMsg, "按住 <kbd>空白鍵</kbd> 錄影、放開結束；或直接點大按鈕開始／停止。");
+    lastVideoTime = -1;
+    requestAnimationFrame(loop);
+  } catch (e) {
+    overlay.classList.remove("hide");
+    if (e.message === "INSECURE") {
+      overlay.textContent = "此頁面不是安全連線，瀏覽器停用了攝影機";
+      say(camMsg, "攝影機只能在 <b>https://</b> 或 localhost 使用。"
+        + "請確認網址開頭是 <b>https://</b>（自簽憑證的警告畫面點「進階 → 繼續前往」即可）。"
+        + "也可以改用右上角的「上傳影片」或「影片連結」模式。", "err");
+      return;
+    }
+    const denied = /NotAllowed|Permission/i.test(e.name + e.message);
+    overlay.textContent = denied ? "攝影機權限被拒絕" : `無法啟動攝影機：${e.message}`;
+    say(camMsg, denied
+      ? "瀏覽器擋下了攝影機。請點網址列左側的圖示允許此網站使用攝影機，再重新整理。"
+      : `無法啟動攝影機：${e.message}`, "err");
+  }
+}
+
+function stopCam() {
+  recording = false; camOn = false;
+  for (const t of video.srcObject?.getTracks() || []) t.stop();
+  video.srcObject = null;
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  overlay.classList.remove("hide"); overlay.textContent = "鏡頭已關閉";
+  badge.textContent = "未啟動"; badge.classList.remove("rec");
+  recBtn.disabled = true; recBtn.classList.remove("on"); recBtn.textContent = "啟動鏡頭";
+  camBtn.textContent = "啟動鏡頭";
+  $("s-fps").textContent = $("s-hands").textContent = $("s-pose").textContent = "—";
+}
+camBtn.onclick = () => camOn ? stopCam() : startCam();
+
+function loop(now) {
+  if (!camOn) return;
+  requestAnimationFrame(loop);
+  if (video.readyState < 2 || video.currentTime === lastVideoTime) return;
+  lastVideoTime = video.currentTime;
+  if (lastTick) {
+    const inst = 1000 / Math.max(now - lastTick, 1);
+    fpsEMA = fpsEMA ? fpsEMA * 0.85 + inst * 0.15 : inst;
+  }
+  lastTick = now;
+
+  let hands = [], pose = null;
+  try {
+    const hr = handLm.detectForVideo(video, Math.round(now));
+    const pr = poseLm.detectForVideo(video, Math.round(now));
+    // ★ 原始未鏡像座標 + Tasks API 原始 handedness，不做任何翻轉／交換。
+    //   （已驗證：這正好等於訓練慣例「手語者的左 = +x」，伺服器 auto-mirror 會回 false）
+    hands = (hr.landmarks || []).map((lms, i) => ({
+      handedness: hr.handednesses?.[i]?.[0]?.categoryName || "Right",
+      score: +(hr.handednesses?.[i]?.[0]?.score ?? 1).toFixed(3),
+      landmarks: lms.map(p => [+p.x.toFixed(5), +p.y.toFixed(5), +p.z.toFixed(5)]),
+    }));
+    pose = pr.landmarks?.[0]
+      ? { landmarks: pr.landmarks[0].map(p => [+p.x.toFixed(5), +p.y.toFixed(5), +p.z.toFixed(5)]) }
+      : null;
+  } catch (e) { console.warn("detect 失敗", e); }
+
+  const shoulders = !!(pose && pose.landmarks[11] && pose.landmarks[12]);
+  $("s-fps").textContent = fpsEMA.toFixed(0);
+  $("s-hands").textContent = hands.length
+    ? hands.map(h => h.handedness === "Left" ? "左" : "右").join(" + ") : "無";
+  $("s-pose").textContent = shoulders ? "雙肩 OK" : "未偵測到";
+  $("s-mirror").textContent = lastMirror;
+  draw(hands, pose, shoulders);
+
+  if (camMode === "auto" && camOn) {
+    autoBuf.push({ pose, hands, timestamp: +((performance.now() - autoT0) / 1000).toFixed(4) });
+    if (autoBuf.length >= 6) flushAuto();
+  }
+
+  if (recording) {
+    recBuf.push({ pose, hands });
+    const el = (performance.now() - recStart) / 1000;
+    badge.textContent = `● 錄製中 ${el.toFixed(1)}s / ${recBuf.length} 幀`;
+    if (el >= MAX_SECONDS) { say(camMsg, `已達 ${MAX_SECONDS} 秒上限，自動停止。`); stopRec(); }
+  }
+}
+
+function draw(hands, pose, shoulders) {
+  const w = canvas.width, h = canvas.height;
+  ctx.save();
+  ctx.translate(w, 0); ctx.scale(-1, 1);       // 只有「顯示」鏡像，資料不動
+  ctx.drawImage(video, 0, 0, w, h);
+  if (pose) {
+    ctx.strokeStyle = shoulders ? "rgba(255,180,84,.85)" : "rgba(248,81,73,.85)";
+    ctx.lineWidth = 3; ctx.beginPath();
+    for (const [a, b] of POSE_EDGES) {
+      const p = pose.landmarks[a], q = pose.landmarks[b];
+      if (!p || !q) continue;
+      ctx.moveTo(p[0] * w, p[1] * h); ctx.lineTo(q[0] * w, q[1] * h);
+    }
+    ctx.stroke();
+    ctx.fillStyle = "#ffb454";
+    for (const i of [0, 11, 12, 13, 14, 15, 16, 23, 24]) {
+      const p = pose.landmarks[i]; if (!p) continue;
+      ctx.beginPath(); ctx.arc(p[0] * w, p[1] * h, 4, 0, 6.2832); ctx.fill();
+    }
+  }
+  for (const hand of hands) {
+    ctx.strokeStyle = "rgba(79,216,232,.9)"; ctx.lineWidth = 2.5; ctx.beginPath();
+    for (const [a, b] of HAND_EDGES) {
+      const p = hand.landmarks[a], q = hand.landmarks[b];
+      ctx.moveTo(p[0] * w, p[1] * h); ctx.lineTo(q[0] * w, q[1] * h);
+    }
+    ctx.stroke();
+    ctx.fillStyle = "#4fd8e8";
+    for (const [x, y] of hand.landmarks) {
+      ctx.beginPath(); ctx.arc(x * w, y * h, 3, 0, 6.2832); ctx.fill();
+    }
+  }
+  ctx.restore();
+}
+
+function setMode(mode) {
+  if (mode === camMode) return;
+  if (recording) stopRec();
+  camMode = mode;
+  document.querySelectorAll("#mode-switch .msw").forEach(b => {
+    const on = b.dataset.mode === mode;
+    b.style.background = on ? "var(--accent)" : "none";
+    b.style.color = on ? "#08201c" : "var(--fg)";
+    b.style.fontWeight = on ? "600" : "400";
+  });
+  recBtn.style.display = mode === "auto" ? "none" : "";
+  autoBuf = []; autoSeen = 0;
+  autoSession = Math.random().toString(36).slice(2) + Date.now().toString(36);
+  autoT0 = performance.now();
+  if (mode === "auto") {
+    badge.textContent = camOn ? "自動偵測：校準中…" : "未啟動";
+    say(camMsg, "自動模式：雙手垂放身側站好，等校準完成後直接比劃，" +
+                "比完把手放回身側即可，不必按鍵。");
+    if (camOn) flushAuto(true);
+  } else {
+    badge.textContent = camOn ? "待機中" : "未啟動";
+    say(camMsg, "按住空白鍵錄影、放開結束；或直接點大按鈕開始／停止。");
+  }
+}
+
+async function flushAuto(reset = false) {
+  if (autoSending || !camOn || camMode !== "auto") return;
+  if (!reset && !autoBuf.length) return;
+  const chunk = autoBuf; autoBuf = [];
+  autoSending = true;
+  try {
+    const r = await fetch("stream", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ session: autoSession, reset, frames: chunk }),
+    });
+    const j = await r.json();
+    if (!j.ok) throw new Error(j.message || "stream failed");
+    renderAutoState(j);
+    (j.results || []).forEach(seg => renderAutoResult(seg));
+  } catch (e) {
+    say(camMsg, "自動模式連線失敗：" + e.message, "err");
+    setMode("manual");
+  } finally {
+    autoSending = false;
+  }
+}
+
+const AUTO_STATE_TEXT = {
+  IDLE_BLANK: "待命，可以開始比劃",
+  SIGNING_ACTIVE: "● 偵測到動作，比劃中",
+  END_CONFIRM: "確認結束中…",
+  COOLDOWN: "冷卻中",
+  FORCED_FINALIZE_COOLDOWN: "冷卻中",
+};
+
+function renderAutoState(j) {
+  if (!j.calibrated) { badge.textContent = "自動偵測：校準中，請站好不要動"; return; }
+  badge.textContent = AUTO_STATE_TEXT[j.state] || j.state;
+  badge.classList.toggle("rec", j.state === "SIGNING_ACTIVE");
+}
+
+function renderAutoResult(seg) {
+  autoSeen += 1;
+  const top = seg.top || [];
+  if (!top.length) return;
+  const best = top[0];
+  const low = best.prob < 0.5;
+  $("res-title").textContent = `第 ${seg.index} 句（${seg.start}s – ${seg.end}s，${seg.frames} 幀）`;
+  $("verdict").className = low ? "verdict low" : "verdict";
+  $("verdict").textContent = low ? `${best.text}（信心不足 ${(best.prob * 100).toFixed(0)}%）`
+                                 : `${best.text}　${(best.prob * 100).toFixed(0)}%`;
+  $("bars").innerHTML = top.map(t => `
+    <div class="row"><span class="lbl">${t.text}</span>
+    <span class="track"><span class="fill" style="width:${(t.prob * 100).toFixed(1)}%"></span></span>
+    <span class="pct">${(t.prob * 100).toFixed(1)}%</span></div>`).join("");
+  $("meta").textContent = `自動切段・${seg.reason}・${seg.frames} 幀`;
+}
+
+function startRec() {
+  if (!camOn || recording || busy) return;
+  recording = true; recBuf = []; recStart = performance.now();
+  recBtn.classList.add("on"); recBtn.textContent = "停止並辨識";
+  badge.classList.add("rec"); badge.textContent = "● 錄製中";
+  $("verdict").className = "hint"; $("verdict").textContent = "錄製中…";
+  $("bars").innerHTML = '<span class="hint">—</span>'; $("meta").textContent = "";
+  say(camMsg, "錄製中：比一個手語動作，完成後放開空白鍵／再按一次按鈕。");
+}
+
+function stopRec() {
+  if (!recording) return;
+  recording = false;
+  const dur = (performance.now() - recStart) / 1000;
+  recBtn.classList.remove("on"); badge.classList.remove("rec"); badge.textContent = "待機中";
+  recBtn.textContent = "開始錄製（或按住空白鍵）";
+  sendCam(recBuf, dur);
+}
+
+recBtn.onclick = () => { if (!camOn) { startCam(); return; } recording ? stopRec() : startRec(); };
+document.querySelectorAll("#mode-switch .msw").forEach(b => {
+  b.addEventListener("click", () => setMode(b.dataset.mode));
+});
+setInterval(() => { if (camMode === "auto" && camOn) flushAuto(); }, 400);
+addEventListener("keydown", e => {
+  if (camMode === "auto") return;                       // 自動模式不吃空白鍵
+  if (e.code !== "Space" || e.repeat || !$("pane-cam").classList.contains("on")) return;
+  if (e.target.tagName === "BUTTON") e.target.blur();
+  if (/INPUT|TEXTAREA/.test(e.target.tagName)) return;
+  e.preventDefault(); startRec();
+});
+addEventListener("keyup", e => {
+  if (camMode === "auto") return;
+  if (e.code !== "Space" || !$("pane-cam").classList.contains("on")) return;
+  if (/INPUT|TEXTAREA/.test(e.target.tagName)) return;
+  e.preventDefault(); stopRec();
+});
+
+async function sendCam(frames, dur) {
+  const withPose = frames.filter(f => f.pose).length;
+  if (frames.length < 4 || withPose < 4) {
+    $("verdict").className = "hint"; $("verdict").textContent = "錄到的有效幀太少，無法辨識。";
+    say(camMsg, `只錄到 ${frames.length} 幀（其中 ${withPose} 幀有偵測到身體）。`
+      + "請錄久一點（建議 1–3 秒），並確認上半身完整入鏡。", "err");
+    return;
+  }
+  busy = true; recBtn.disabled = true;
+  $("verdict").className = "hint"; $("verdict").textContent = "辨識中…";
+  const t0 = performance.now();
+  try {
+    const r = await fetch("predict", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ frames,
+                             fps: +(frames.length / Math.max(dur, 1e-3)).toFixed(2),
+                             duration: +dur.toFixed(3) }) });
+    renderCam(await r.json(), performance.now() - t0, dur);
+  } catch (e) {
+    $("verdict").className = "hint"; $("verdict").textContent = "連不到伺服器。";
+    say(camMsg, `無法連到伺服器：${e.message}`, "err");
+  } finally { busy = false; recBtn.disabled = !camOn; }
+}
+
+function renderCam(d, rtt, dur) {
+  if (!d.ok) {
+    $("verdict").className = "hint"; $("verdict").textContent = d.message || "辨識失敗。";
+    say(camMsg, d.message || "伺服器回報失敗。", "err");
+    return;
+  }
+  lastMirror = (d.mirrored ? "需鏡像 (True)" : "不需鏡像 (False)")
+    + ` · 左肩x ${d.left_shoulder_x > 0 ? "+" : ""}${d.left_shoulder_x}`;
+  $("s-mirror").textContent = lastMirror;
+
+  const t1 = d.top5[0];
+  $("verdict").className = "";
+  $("verdict").innerHTML = t1.prob < 0.5
+    ? `<b style="color:var(--accent2)">信心不足 — 可能不在這 42 類裡</b><br>`
+      + `<span class="hint">最高只有 ${(t1.prob * 100).toFixed(1)}%（建議門檻 50%）。下面仍列出 top-5 供參考。</span>`
+    : `<b style="color:var(--ok);font-size:17px">${t1.text}</b>`
+      + `　<span class="hint">${(t1.prob * 100).toFixed(1)}% · ${t1.label}</span>`;
+
+  $("bars").innerHTML = "";
+  d.top5.forEach((it, i) => {
+    const pct = it.prob * 100;
+    const el = document.createElement("div");
+    el.className = "bar" + (i ? " dim" : "");
+    el.innerHTML = `<div class="top"><span class="txt">${it.text}</span>`
+      + `<span class="pct">${pct.toFixed(1)}%</span></div>`
+      + `<div class="track"><div class="fill" style="width:${Math.max(pct, 0.6)}%"></div></div>`;
+    $("bars").appendChild(el);
+  });
+
+  $("meta").innerHTML = `錄製 ${dur.toFixed(2)}s · 送出 ${d.n_frames} 幀 (有效 ${d.n_valid}) · `
+    + `擷取 ${(d.n_frames / dur).toFixed(0)} fps<br>`
+    + `伺服器：轉檔 ${d.convert_ms} ms + 推論 ${d.infer_ms} ms · 來回 ${rtt.toFixed(0)} ms<br>`
+    + `鏡像：mirrored=${d.mirrored} (${d.mirror_mode}) · 左肩正規化 x = `
+    + `${d.left_shoulder_x > 0 ? "+" : ""}${d.left_shoulder_x} `
+    + `${d.convention_ok ? "✔ 與訓練慣例一致 (期望 ≈ +0.50)" : "✘ 方向相反！"}`;
+  say(camMsg, `完成：${t1.text}（${(t1.prob * 100).toFixed(1)}%）`, "ok");
+}
+
+/* ══════════════ 模式二／三：影片 ════════════════════════ */
+function setProg(box, pct, label) {
+  box.classList.add("on");
+  box.querySelector(".fill").style.width = Math.max(0, Math.min(100, pct)) + "%";
+  box.querySelector(".lbl").textContent = label;
+}
+
+async function pollJob(jobId, progBox, msgEl, btn) {
+  while (true) {
+    await new Promise(r => setTimeout(r, 700));
+    let j;
+    try { j = await (await fetch("job/" + jobId)).json(); }
+    catch (e) { say(msgEl, `連線中斷：${e.message}`, "err"); break; }
+
+    if (j.state === "error") {
+      setProg(progBox, 0, "失敗");
+      progBox.classList.remove("on");
+      say(msgEl, `辨識失敗：${j.error}`, "err");
+      break;
+    }
+    const pct = j.total ? (j.done / j.total) * 100 : 4;
+    setProg(progBox, pct, j.total ? `${j.phase}（${(pct).toFixed(0)}%）` : j.phase);
+    if (j.state === "done") {
+      progBox.classList.remove("on");
+      say(msgEl, "完成。", "ok");
+      renderVideo(j.result, j.title);
+      break;
+    }
+  }
+  btn.disabled = false;
+}
+
+function renderVideo(res, title) {
+  const sum = $("vsummary");
+  if (!res || res.left_shoulder_x === null) {
+    sum.className = "hint";
+    sum.textContent = res?.message || "這支影片偵測不到雙肩，無法辨識。";
+    $("vwhole").innerHTML = ""; $("vtable").innerHTML = ""; $("vmeta").textContent = "";
+    return;
+  }
+  sum.className = "";
+  sum.innerHTML = `<b>${(title || "影片").slice(0, 70)}</b><br>`
+    + `<span class="hint">影片 ${res.video_seconds ?? res.duration}s · 追蹤 ${res.n_tracked} 幀 `
+    + `(有效 ${res.n_valid}) · 切出 ${res.segments.length} 段</span>`;
+
+  const pills = t => t.map((x, i) =>
+    `<span class="pill">${i === 0 ? "<b>" : ""}${x.text}${i === 0 ? "</b>" : ""} `
+    + `${(x.prob * 100).toFixed(0)}%</span>`).join("");
+
+  $("vwhole").innerHTML = res.whole
+    ? `<div style="margin:12px 0 6px;font-size:13px"><span class="hint">整段一次辨識：</span><br>${pills(res.whole.top)}</div>`
+    : "";
+
+  const rows = res.segments.map(s => s.skipped
+    ? `<tr><td class="num">${s.index}</td><td class="num">${s.start}–${s.end}s</td>`
+      + `<td class="num">${s.n_frames}</td><td class="hint">有效幀太少，略過</td></tr>`
+    : `<tr><td class="num">${s.index}</td><td class="num">${s.start}–${s.end}s</td>`
+      + `<td class="num">${s.n_frames}</td><td class="top1">${pills(s.top)}</td></tr>`).join("");
+  $("vtable").innerHTML = res.segments.length
+    ? `<thead><tr><th>#</th><th>時間段</th><th>幀數</th><th>TOP-3（中文 / 機率）</th></tr></thead><tbody>${rows}</tbody>`
+    : `<tbody><tr><td class="hint">動能切段沒切出任何片段（影片可能沒有明顯停頓）。上面的「整段一次辨識」仍可參考。</td></tr></tbody>`;
+
+  $("vmeta").innerHTML = `追蹤 ${res.track_seconds}s (${res.track_fps} fps) · 分析 ${res.analyze_seconds}s<br>`
+    + `鏡像：mirrored=${res.mirrored} (${res.mirror_mode}) · 左肩正規化 x = `
+    + `${res.left_shoulder_x > 0 ? "+" : ""}${res.left_shoulder_x} `
+    + `${res.convention_ok ? "✔ 與訓練慣例一致" : "✘ 方向相反！"}<br>`
+    + `<span class="hint">42 類是封閉集合；機率低於 50% 多半代表這個手語不在詞表內。</span>`;
+}
+
+$("up-btn").onclick = async () => {
+  const f = $("up-file").files?.[0];
+  if (!f) { say($("up-msg"), "請先選一支影片。", "err"); return; }
+  const limMB = +$("lim-mb").textContent;
+  if (f.size > limMB * 1024 * 1024) {
+    say($("up-msg"), `檔案 ${(f.size / 1048576).toFixed(0)} MB，超過 ${limMB} MB 上限。`, "err"); return;
+  }
+  $("up-btn").disabled = true;
+  say($("up-msg"), "上傳中…");
+  setProg($("up-prog"), 2, "上傳中…");
+  const fd = new FormData(); fd.append("file", f, f.name);
+  try {
+    const r = await fetch("analyze_upload",
+                          { method: "POST", body: fd });
+    const d = await r.json();
+    if (!d.ok) { setProg($("up-prog"), 0, "失敗"); $("up-prog").classList.remove("on");
+                 say($("up-msg"), d.message, "err"); $("up-btn").disabled = false; return; }
+    say($("up-msg"), "已排入處理佇列，處理時間約與影片長度相當。");
+    pollJob(d.job_id, $("up-prog"), $("up-msg"), $("up-btn"));
+  } catch (e) {
+    $("up-prog").classList.remove("on");
+    say($("up-msg"), `上傳失敗：${e.message}`, "err"); $("up-btn").disabled = false;
+  }
+};
+
+$("url-btn").onclick = async () => {
+  const url = $("url-input").value.trim();
+  if (!/^https?:\/\//i.test(url)) { say($("url-msg"), "請輸入 http:// 或 https:// 開頭的網址。", "err"); return; }
+  $("url-btn").disabled = true;
+  say($("url-msg"), "送出中…"); setProg($("url-prog"), 2, "查詢影片資訊…");
+  try {
+    const r = await fetch("analyze_url", { method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url }) });
+    const d = await r.json();
+    if (!d.ok) { $("url-prog").classList.remove("on"); say($("url-msg"), d.message, "err");
+                 $("url-btn").disabled = false; return; }
+    say($("url-msg"), "已排入處理佇列。");
+    pollJob(d.job_id, $("url-prog"), $("url-msg"), $("url-btn"));
+  } catch (e) {
+    $("url-prog").classList.remove("on");
+    say($("url-msg"), `送出失敗：${e.message}`, "err"); $("url-btn").disabled = false;
+  }
+};
+$("url-input").addEventListener("keydown", e => { if (e.key === "Enter") $("url-btn").click(); });
+
+/* 除錯把手 */
+window.__knee42 = { sendCam, renderCam, renderVideo, startRec, stopRec, showMode,
+                    get buf() { return recBuf; } };
+
+startCam();
+</script>
+</body>
+</html>

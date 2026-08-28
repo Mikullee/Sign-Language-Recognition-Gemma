@@ -8,11 +8,24 @@
 ## recognition
 
 放辨識端主成果：
-- 訓練
-- 評估
-- 即時推論
-- 共用 inference helpers
-- legacy baseline
+- `transformer/` — **現行辨識路徑**（42 類 Transformer，657 維輸入）
+- `realtime/` — 即時擷取、auto-trigger、共用幀層前處理、legacy BiGRU 即時推論
+- `training/` — 訓練
+- `evaluation/` — 評估
+- `inference/` — 共用 inference helpers
+
+## webservice
+
+瀏覽器測試站(HTTPS,標準函式庫實作):
+- `server.py` — 靜態檔 + `/predict` + 影片工作佇列
+- `static/index.html` — 單頁介面,MediaPipe 在瀏覽器端執行
+
+## artifacts
+
+放即時辨識載入的模型 bundle：
+- `realtime/best_current/` — 42 類 Transformer bundle（唯一的 runtime bundle）
+
+細節見 [`artifacts/README.md`](../artifacts/README.md)。
 
 ## generation
 

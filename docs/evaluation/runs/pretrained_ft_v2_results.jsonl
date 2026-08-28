@@ -1,0 +1,12 @@
+{"test_signer": "H", "seed": 7, "val_macro": 0.9972222222222221, "epochs_ran": 25, "test": {"top1": 0.8155339805825242, "top3": 0.9385113268608414, "macro_top1": 0.8190476190476191}}
+{"test_signer": "H", "seed": 42, "val_macro": 1.0, "epochs_ran": 27, "test": {"top1": 0.8398058252427184, "top3": 0.9433656957928802, "macro_top1": 0.8427437641723357}}
+{"test_signer": "H", "seed": 2026, "val_macro": 1.0, "epochs_ran": 30, "test": {"top1": 0.8155339805825242, "top3": 0.9142394822006472, "macro_top1": 0.8188208616780046}}
+{"test_signer": "L", "seed": 7, "val_macro": 0.9959183673469388, "epochs_ran": 25, "test": {"top1": 0.8497409326424871, "top3": 0.9447322970639033, "macro_top1": 0.845508459794174}}
+{"test_signer": "L", "seed": 42, "val_macro": 0.9976190476190476, "epochs_ran": 24, "test": {"top1": 0.8514680483592401, "top3": 0.9378238341968912, "macro_top1": 0.8481336124193268}}
+{"test_signer": "L", "seed": 2026, "val_macro": 0.9952380952380951, "epochs_ran": 35, "test": {"top1": 0.8929188255613126, "top3": 0.9481865284974094, "macro_top1": 0.8887406244549102}}
+{"test_signer": "P", "seed": 7, "val_macro": 0.9973544973544973, "epochs_ran": 30, "test": {"top1": 0.8277310924369747, "top3": 0.9411764705882353, "macro_top1": 0.8213713792982087}}
+{"test_signer": "P", "seed": 42, "val_macro": 0.9965986394557824, "epochs_ran": 25, "test": {"top1": 0.8088235294117647, "top3": 0.9222689075630253, "macro_top1": 0.8009488479000675}}
+{"test_signer": "P", "seed": 2026, "val_macro": 1.0, "epochs_ran": 36, "test": {"top1": 0.8529411764705882, "top3": 0.9222689075630253, "macro_top1": 0.8416391196879001}}
+{"test_signer": "X", "seed": 7, "val_macro": 1.0, "epochs_ran": 26, "test": {"top1": 0.7357512953367875, "top3": 0.9067357512953368, "macro_top1": 0.7352171637885924}}
+{"test_signer": "X", "seed": 42, "val_macro": 1.0, "epochs_ran": 24, "test": {"top1": 0.7098445595854922, "top3": 0.8514680483592401, "macro_top1": 0.7153148438862724}}
+{"test_signer": "X", "seed": 2026, "val_macro": 1.0, "epochs_ran": 32, "test": {"top1": 0.7288428324697754, "top3": 0.8704663212435233, "macro_top1": 0.736070411070411}}

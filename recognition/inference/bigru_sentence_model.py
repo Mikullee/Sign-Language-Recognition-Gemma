@@ -1,3 +1,10 @@
+"""BiGRU sentence classifier shared by the legacy Knee42 recognition path.
+
+Previously named daily30_sentence_model_utils, which was misleading: the
+retired 27-class daily30 app was only one of its callers, and the 42-class
+Knee42 BiGRU path in knee42_ivcam / knee42_devonly / knee42_test_once still
+depends on it.
+"""
 from __future__ import annotations
 
 import numpy as np

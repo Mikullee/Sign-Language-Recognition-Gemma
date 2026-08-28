@@ -21,7 +21,7 @@ from mediapipe.tasks.python.vision.hand_landmarker import HandLandmarker, HandLa
 from mediapipe.tasks.python.vision.pose_landmarker import PoseLandmarker, PoseLandmarkerOptions
 
 from recognition.config import preview_paths
-from recognition.inference.extract_daily30_sentence_features import extract_frame_vector
+from recognition.realtime.knee42_preprocessing import observation_from_results
 from recognition.realtime.auto_trigger import (
     AutoTriggerConfig,
     AutoTriggerEngine,
@@ -33,7 +33,6 @@ from recognition.realtime.personal_temporal import PersonalTemporalModel, Person
 
 
 PATHS = preview_paths()
-DEFAULT_CACHE_DIR = Path("artifacts") / "realtime" / "best_current"
 DEFAULT_END_SEARCH_GRID = {
     "end_hold_sec": [0.25, 0.35, 0.50],
     "end_rest_vote_ratio": [0.75, 0.80, 0.90],
@@ -60,11 +59,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=str(PATHS.results_dir / "auto_trigger_landmark_cache"),
     )
     parser.add_argument("--base-auto-config", default="")
+    parser.add_argument(
+        "--install-config",
+        type=Path,
+        default=None,
+        help="copy the calibrated config here if every video passes; skipped when omitted",
+    )
     parser.add_argument("--boundary-tolerance-sec", type=float, default=0.30)
     parser.add_argument("--detector-frame-skip", type=int, default=2)
     parser.add_argument("--inference-max-width", type=int, default=960)
-    parser.add_argument("--model-cache-dir", default=str(DEFAULT_CACHE_DIR))
-    parser.add_argument("--skip-classification", action="store_true")
     parser.add_argument("--skip-debug-videos", action="store_true")
     return parser.parse_args(argv)
 
@@ -225,25 +228,6 @@ class CandidateEvaluation:
             float(np.mean(delays)) if delays else math.inf,
             config_distance,
         )
-
-
-@dataclass(frozen=True)
-class ClassificationComparison:
-    video_path: Path
-    expected_label: str
-    manual_label: str
-    manual_confidence: float
-    auto_label: str
-    auto_confidence: float
-    manual_correct: bool
-    auto_correct: bool
-    segmentation_regression: bool
-    model_issue: bool
-
-    def to_row(self) -> dict[str, object]:
-        payload = asdict(self)
-        payload["video_path"] = self.video_path.name
-        return payload
 
 
 def load_annotations(csv_path: str | Path) -> list[VideoAnnotation]:
@@ -454,10 +438,10 @@ def extract_video_landmarks(
                     rgb = cv2.cvtColor(detection_frame, cv2.COLOR_BGR2RGB)
                     mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
                     frame_vectors.append(
-                        extract_frame_vector(
+                        observation_from_results(
                             hand_landmarker.detect(mp_image),
                             pose_landmarker.detect(mp_image),
-                        )
+                        ).trigger_values
                     )
                     timestamps_sec.append(frame_index / fps)
                 frame_index += 1
@@ -527,96 +511,6 @@ def load_or_extract_video_cache(
         frame_vectors=cache.frame_vectors.astype(np.float32),
     )
     return cache
-
-
-def classify_manual_and_auto_crops(
-    cache: VideoLandmarkCache,
-    annotation: VideoAnnotation,
-    auto_segment: SegmentResult | None,
-    predictor: Callable[[list[np.ndarray]], tuple[str, float]],
-) -> ClassificationComparison:
-    manual_mask = (
-        (cache.timestamps_sec >= annotation.start_sec)
-        & (cache.timestamps_sec <= annotation.end_sec)
-    )
-    manual_frames = [
-        vector.copy()
-        for vector in cache.frame_vectors[manual_mask]
-    ]
-    auto_frames = auto_segment.frame_vectors if auto_segment is not None else []
-    manual_label, manual_confidence = predictor(manual_frames)
-    auto_label, auto_confidence = predictor(auto_frames)
-    manual_correct = manual_label == annotation.expected_label
-    auto_correct = auto_label == annotation.expected_label
-    return ClassificationComparison(
-        video_path=annotation.video_path,
-        expected_label=annotation.expected_label,
-        manual_label=manual_label,
-        manual_confidence=float(manual_confidence),
-        auto_label=auto_label,
-        auto_confidence=float(auto_confidence),
-        manual_correct=manual_correct,
-        auto_correct=auto_correct,
-        segmentation_regression=bool(manual_correct and not auto_correct),
-        model_issue=bool(not manual_correct and not auto_correct),
-    )
-
-
-def build_sentence_predictor(
-    model_cache_dir: str | Path,
-) -> Callable[[list[np.ndarray]], tuple[str, float]]:
-    import torch
-
-    from recognition.inference.daily30_sentence_feature_utils import build_feature_sequence
-    from recognition.inference.daily30_sentence_model_utils import BiGRUSentenceClassifier
-    from recognition.inference.daily30_sentence_realtime_utils import (
-        ensure_artifacts_cached,
-        load_runtime_bundle,
-    )
-    from recognition.inference.extract_daily30_sentence_features import normalize_relative_frames, resize_seq
-
-    cache_dir = ensure_artifacts_cached(Path(model_cache_dir))
-    bundle = load_runtime_bundle(cache_dir)
-    preferred_device = str(bundle.get("device", "auto")).lower()
-    if preferred_device == "cuda" and torch.cuda.is_available():
-        device = torch.device("cuda")
-    elif preferred_device == "cpu":
-        device = torch.device("cpu")
-    else:
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    feature_dim = 225 * (2 if bool(bundle["append_delta"]) else 1)
-    model = BiGRUSentenceClassifier(
-        input_dim=feature_dim,
-        hidden_size=int(bundle["hidden_size"]),
-        num_layers=int(bundle["num_layers"]),
-        dropout=float(bundle["dropout"]),
-        num_classes=len(bundle["labels"]),
-        pooling=str(bundle["pooling"]),
-    )
-    model.load_state_dict(torch.load(bundle["paths"]["best_model"], map_location=device))
-    model.to(device)
-    model.eval()
-
-    def predict(frame_vectors: list[np.ndarray]) -> tuple[str, float]:
-        if not frame_vectors:
-            return "片段過短", 0.0
-        raw_frames = np.stack(frame_vectors, axis=0)
-        relative = normalize_relative_frames(raw_frames)
-        resized = resize_seq(relative, int(bundle["sequence_length"]))
-        features = build_feature_sequence(
-            resized,
-            append_delta=bool(bundle["append_delta"]),
-            zscore_features=bool(bundle["zscore_features"]),
-        )
-        tensor = torch.tensor(features, dtype=torch.float32, device=device).unsqueeze(0)
-        with torch.no_grad():
-            probabilities = torch.softmax(model(tensor), dim=1)[0].cpu().numpy()
-        predicted_index = int(np.argmax(probabilities))
-        label_id = str(bundle["labels"][predicted_index])
-        localized = str(bundle["label_display"].get(label_id, label_id))
-        return localized, float(probabilities[predicted_index])
-
-    return predict
 
 
 def write_debug_video(
@@ -706,20 +600,12 @@ def write_debug_video(
 def write_evaluation_outputs(
     out_dir: str | Path,
     best: CandidateEvaluation,
-    comparisons: list[ClassificationComparison],
     search_metadata: dict[str, object],
     tolerance_sec: float,
 ) -> dict[str, Path]:
     output_dir = Path(out_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    comparison_by_path = {comparison.video_path: comparison for comparison in comparisons}
-    rows = []
-    for metric in best.per_video:
-        row = metric.to_row()
-        comparison = comparison_by_path.get(metric.video_path)
-        if comparison is not None:
-            row.update(comparison.to_row())
-        rows.append(row)
+    rows = [metric.to_row() for metric in best.per_video]
 
     metrics_path = output_dir / "per_video_metrics.csv"
     with metrics_path.open("w", encoding="utf-8-sig", newline="") as file:
@@ -738,13 +624,6 @@ def write_evaluation_outputs(
         for metric in best.per_video
         if metric.end_error_sec is not None
     ]
-    classification_summary = {
-        "evaluated_count": len(comparisons),
-        "manual_correct_count": sum(item.manual_correct for item in comparisons),
-        "auto_correct_count": sum(item.auto_correct for item in comparisons),
-        "segmentation_regression_count": sum(item.segmentation_regression for item in comparisons),
-        "model_issue_count": sum(item.model_issue for item in comparisons),
-    }
     summary = {
         "video_count": len(best.per_video),
         "passed_count": sum(metric.passed for metric in best.per_video),
@@ -756,7 +635,6 @@ def write_evaluation_outputs(
         "max_end_error_sec": max(end_errors, default=None),
         "extra_segment_count": sum(metric.extra_segment_count for metric in best.per_video),
         "search": search_metadata,
-        "classification": classification_summary,
     }
     summary_path = output_dir / "summary.json"
     summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -775,13 +653,15 @@ def write_evaluation_outputs(
 def install_best_config_if_passed(
     best: CandidateEvaluation,
     destination: str | Path,
-    comparisons: list[ClassificationComparison],
 ) -> Path | None:
+    """Install the calibrated config only if every video passed its boundary check.
+
+    This gate used to additionally require that the retired 27-class classifier
+    saw no segmentation regression.  That model is gone, so the gate is now
+    purely about boundary accuracy -- it is weaker than it was, and the caller
+    must pass an explicit destination rather than overwriting a config in place.
+    """
     if not best.per_video or not all(metric.passed for metric in best.per_video):
-        return None
-    if len(comparisons) != len(best.per_video):
-        return None
-    if any(comparison.segmentation_regression for comparison in comparisons):
         return None
     destination_path = Path(destination)
     destination_path.parent.mkdir(parents=True, exist_ok=True)
@@ -831,7 +711,6 @@ def main(argv: list[str] | None = None) -> None:
         }
     )
 
-    comparisons: list[ClassificationComparison] = []
     segments_by_path = {
         annotation.video_path: detect_cached_segments(
             caches[annotation.video_path],
@@ -839,30 +718,16 @@ def main(argv: list[str] | None = None) -> None:
         )
         for annotation in annotations
     }
-    if not args.skip_classification:
-        predictor = build_sentence_predictor(args.model_cache_dir)
-        for annotation in annotations:
-            segments = segments_by_path[annotation.video_path]
-            comparisons.append(
-                classify_manual_and_auto_crops(
-                    caches[annotation.video_path],
-                    annotation,
-                    segments[0] if segments else None,
-                    predictor,
-                )
-            )
-
     output_paths = write_evaluation_outputs(
         output_dir,
         best,
-        comparisons=comparisons,
         search_metadata=search_metadata,
         tolerance_sec=float(args.boundary_tolerance_sec),
     )
-    installed_config = install_best_config_if_passed(
-        best,
-        Path(args.model_cache_dir) / "best_auto_trigger.json",
-        comparisons=comparisons,
+    installed_config = (
+        install_best_config_if_passed(best, args.install_config)
+        if args.install_config
+        else None
     )
     debug_paths: list[Path] = []
     if not args.skip_debug_videos:

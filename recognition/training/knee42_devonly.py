@@ -13,7 +13,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
-from recognition.inference.daily30_sentence_model_utils import BiGRUSentenceClassifier
+from recognition.inference.bigru_sentence_model import BiGRUSentenceClassifier
 from recognition.training.knee42_policy import validate_research_rows
 from recognition.training.train_knee42_bigru import (
     CACHE_VERSION,

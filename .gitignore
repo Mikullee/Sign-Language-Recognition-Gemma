@@ -53,8 +53,17 @@ app_config.local.json
 !artifacts/realtime/best_current/
 !artifacts/realtime/best_current/.gitkeep
 !artifacts/realtime/best_current/best_model.pt
-!artifacts/realtime/best_current/label_map_v1.json
-!artifacts/realtime/best_current/train_summary_v1.json
-!artifacts/realtime/best_current/launch_summary.json
-!artifacts/realtime/best_current/fixed_sentence_templates_daily30.csv
-!artifacts/realtime/best_current/best_auto_trigger.json
+!artifacts/realtime/best_current/label_map_knee42.json
+!artifacts/realtime/best_current/display_text_map.json
+!artifacts/realtime/best_current/feature_config.json
+!artifacts/realtime/best_current/runtime_config.json
+!artifacts/realtime/best_current/model_card.json
+!artifacts/realtime/best_current/integrity_manifest.sha256
+
+
+# web service local state (certificates, vendored MediaPipe web assets, uploads)
+webservice/certs/
+webservice/vendor/
+webservice/uploads/
+webservice/*.log
+webservice/*.pid
