@@ -40,7 +40,7 @@ python -m webservice.server --port 8642
 - **上傳影片**：≤ 200 MB／≤ 180 秒，自動切段，每段給 top-3。
 - 比劃時**兩邊肩膀都要在畫面內**（要靠雙肩做正規化）。
 
-攝影機模式另需 MediaPipe 的網頁資產，設定見 [`webservice/README.md`](../webservice/README.md)。
+攝影機模式所需的 WebAssembly 資產,上面那支 `fetch_mediapipe_models.py` 已經一併取得。
 
 ## 相機即時辨識
 

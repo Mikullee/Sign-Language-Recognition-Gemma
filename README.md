@@ -606,7 +606,8 @@ python -m webservice.server --port 8642
 
 瀏覽器開 `https://<主機>:8642`(**必須 https**,攝影機 API 只在安全來源啟用)。
 攝影機模式的 MediaPipe **在瀏覽器裡跑,只有骨架座標會送到伺服器,畫面不外傳**。
-設定與限制見 [`webservice/README.md`](webservice/README.md)。
+攝影機模式所需的 WebAssembly 資產由 `scripts/fetch_mediapipe_models.py` 一併取得;
+其餘設定與限制見 [`webservice/README.md`](webservice/README.md)。
 
 > ⚠️ 測試站**沒有身分驗證**,任何連得到該 port 的人都能使用。請綁在受信任網段,
 > 或放在會做驗證的反向代理後面。

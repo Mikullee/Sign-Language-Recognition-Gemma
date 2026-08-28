@@ -20,23 +20,29 @@ python -m webservice.server --port 8642
 
 ### MediaPipe 網頁資產
 
-攝影機模式的 MediaPipe **在瀏覽器裡跑**,需要 `vision_bundle.mjs`、wasm 與 `.task`。
-本 repository 不重新散布這些檔案(見 README §4.3 的公開範圍),請自行取得後放進一個目錄:
+攝影機模式的 MediaPipe **在瀏覽器裡跑**,需要 Tasks Vision 的 WebAssembly 建置。
+本 repository 不散布這些檔案(見
+[`THIRD_PARTY_NOTICES.md`](../THIRD_PARTY_NOTICES.md)),但抓取腳本會處理:
+
+```bash
+python scripts/fetch_mediapipe_models.py
+```
+
+它會取得並逐檔核對 SHA-256,放進 `webservice/vendor/mediapipe/`:
 
 ```
-<vendor-dir>/
+vendor/mediapipe/
 ├── vision_bundle.mjs
-├── wasm/
-│   ├── vision_wasm_internal.js
-│   ├── vision_wasm_internal.wasm
-│   ├── vision_wasm_nosimd_internal.js
-│   └── vision_wasm_nosimd_internal.wasm
+├── wasm/vision_wasm_internal.{js,wasm}
+├── wasm/vision_wasm_nosimd_internal.{js,wasm}
 ├── hand_landmarker.task
 └── pose_landmarker_lite.task
 ```
 
-然後 `--vendor-dir <path>`,或設環境變數 `SLR_WEB_VENDOR_DIR`。
-**上傳影片與貼連結兩種模式不需要這些**,只有攝影機模式要。
+版本固定在 `@mediapipe/tasks-vision` **0.10.35**,與 Python 端的 mediapipe 同版。
+要放在別處就用 `--vendor-dir`,或設環境變數 `SLR_WEB_VENDOR_DIR`。
+
+**上傳影片模式不需要這些**,只有攝影機模式要。
 
 ## 三種模式
 

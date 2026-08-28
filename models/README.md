@@ -20,6 +20,9 @@ MediaPipe 的 `.task` 模型檔放這裡。**本 repository 不散布這兩個�
 
 ## 自動取得
 
+同一支腳本也會取得網頁服務攝影機模式需要的 WebAssembly 資產
+(放進 `webservice/vendor/mediapipe/`)。只要 `.task` 的話加 `--python`。
+
 ```bash
 python scripts/fetch_mediapipe_models.py
 ```
