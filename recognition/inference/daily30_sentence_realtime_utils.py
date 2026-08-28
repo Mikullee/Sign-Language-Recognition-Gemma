@@ -8,7 +8,7 @@ from pathlib import Path
 from recognition.config import preview_paths
 
 
-DEFAULT_CACHE_DIR = preview_paths().runtime_bundle_dir
+DEFAULT_CACHE_DIR = preview_paths().legacy_bundle_dir
 
 
 def artifact_paths(cache_dir: Path) -> dict[str, Path]:

@@ -1,0 +1,334 @@
+{
+  "model_id": "knee42-transformer-v12",
+  "architecture": {
+    "family": "Transformer encoder",
+    "layers": 4,
+    "model_dim": 256,
+    "heads": 8,
+    "pooling": "mean",
+    "input_shape": [
+      64,
+      657
+    ],
+    "num_classes": 42
+  },
+  "training_split": {
+    "signers_in_training_data": [
+      "P",
+      "H",
+      "X",
+      "L"
+    ],
+    "validation": "random 12% of all samples, NOT held out by signer",
+    "held_out_test_set": null,
+    "checkpoint_reported_value": {
+      "val_macro_mixed": 1.0,
+      "interpretation": "Optimistic and not usable as an accuracy claim: every signer in the validation split also appears in the training split."
+    },
+    "upstream_note": "trained on all 4 signers; expected cold-start on unseen signers ~0.81 (LOSO v2)"
+  },
+  "reported_metrics": {
+    "shipped_checkpoint": {
+      "held_out_score": null,
+      "reason": "Released weights were retrained on all four signers after the method was validated, so no signer remains held out. Numbers below describe the method, measured on separate models."
+    },
+    "leave_one_signer_out": {
+      "protocol": "leave-one-signer-out; the test signer is excluded from training",
+      "metric": "macro_top1",
+      "applies_to": "the method, measured on per-arm models -- not the released checkpoint",
+      "arms": {
+        "transslr": {
+          "metric": "macro_top1",
+          "runs": 12,
+          "per_test_signer": {
+            "H": {
+              "mean": 0.7377,
+              "std": 0.0433,
+              "seeds": 3,
+              "values": [
+                0.6889,
+                0.7941,
+                0.7302
+              ]
+            },
+            "L": {
+              "mean": 0.6014,
+              "std": 0.0499,
+              "seeds": 3,
+              "values": [
+                0.6165,
+                0.5341,
+                0.6534
+              ]
+            },
+            "P": {
+              "mean": 0.6558,
+              "std": 0.0434,
+              "seeds": 3,
+              "values": [
+                0.6021,
+                0.7085,
+                0.6569
+              ]
+            },
+            "X": {
+              "mean": 0.4721,
+              "std": 0.0372,
+              "seeds": 3,
+              "values": [
+                0.518,
+                0.4268,
+                0.4713
+              ]
+            }
+          },
+          "overall_mean": 0.6167,
+          "description": "no pretraining baseline",
+          "source_log": "transslr_results.jsonl"
+        },
+        "pretrained_ft": {
+          "metric": "macro_top1",
+          "runs": 12,
+          "per_test_signer": {
+            "H": {
+              "mean": 0.8269,
+              "std": 0.0112,
+              "seeds": 3,
+              "values": [
+                0.819,
+                0.8427,
+                0.8188
+              ]
+            },
+            "L": {
+              "mean": 0.8608,
+              "std": 0.0198,
+              "seeds": 3,
+              "values": [
+                0.8455,
+                0.8481,
+                0.8887
+              ]
+            },
+            "P": {
+              "mean": 0.8213,
+              "std": 0.0166,
+              "seeds": 3,
+              "values": [
+                0.8214,
+                0.8009,
+                0.8416
+              ]
+            },
+            "X": {
+              "mean": 0.7289,
+              "std": 0.0096,
+              "seeds": 3,
+              "values": [
+                0.7352,
+                0.7153,
+                0.7361
+              ]
+            }
+          },
+          "overall_mean": 0.8095,
+          "description": "MOC pretraining then finetuning",
+          "source_log": "pretrained_ft_v2_results.jsonl"
+        },
+        "proto": {
+          "metric": "macro_top1",
+          "runs": 12,
+          "per_test_signer": {
+            "H": {
+              "mean": 0.8577,
+              "std": 0.0061,
+              "seeds": 3,
+              "values": [
+                0.8635,
+                0.8492,
+                0.8603
+              ]
+            },
+            "L": {
+              "mean": 0.8853,
+              "std": 0.028,
+              "seeds": 3,
+              "values": [
+                0.8702,
+                0.8611,
+                0.9246
+              ]
+            },
+            "P": {
+              "mean": 0.8104,
+              "std": 0.0355,
+              "seeds": 3,
+              "values": [
+                0.8287,
+                0.7609,
+                0.8417
+              ]
+            },
+            "X": {
+              "mean": 0.6928,
+              "std": 0.0242,
+              "seeds": 3,
+              "values": [
+                0.699,
+                0.6605,
+                0.7188
+              ]
+            }
+          },
+          "overall_mean": 0.8115,
+          "description": "prototype classification head",
+          "source_log": "proto_results.jsonl"
+        },
+        "mirror_ab": {
+          "metric": "macro_top1",
+          "runs": 24,
+          "per_test_signer": {
+            "H@p=0.3": {
+              "mean": 0.7964,
+              "std": 0.0178,
+              "seeds": 3,
+              "values": [
+                0.8118,
+                0.8061,
+                0.7714
+              ]
+            },
+            "H@p=0.5": {
+              "mean": 0.7792,
+              "std": 0.0218,
+              "seeds": 3,
+              "values": [
+                0.7888,
+                0.7998,
+                0.7491
+              ]
+            },
+            "L@p=0.3": {
+              "mean": 0.8729,
+              "std": 0.0128,
+              "seeds": 3,
+              "values": [
+                0.8638,
+                0.8911,
+                0.864
+              ]
+            },
+            "L@p=0.5": {
+              "mean": 0.8704,
+              "std": 0.0204,
+              "seeds": 3,
+              "values": [
+                0.8592,
+                0.899,
+                0.8529
+              ]
+            },
+            "P@p=0.3": {
+              "mean": 0.845,
+              "std": 0.0202,
+              "seeds": 3,
+              "values": [
+                0.8638,
+                0.817,
+                0.8542
+              ]
+            },
+            "P@p=0.5": {
+              "mean": 0.8076,
+              "std": 0.0247,
+              "seeds": 3,
+              "values": [
+                0.8189,
+                0.7734,
+                0.8306
+              ]
+            },
+            "X@p=0.3": {
+              "mean": 0.6556,
+              "std": 0.0198,
+              "seeds": 3,
+              "values": [
+                0.6568,
+                0.6308,
+                0.6792
+              ]
+            },
+            "X@p=0.5": {
+              "mean": 0.6259,
+              "std": 0.0192,
+              "seeds": 3,
+              "values": [
+                0.5989,
+                0.6363,
+                0.6424
+              ]
+            }
+          },
+          "overall_mean": 0.7816,
+          "description": "horizontal mirror augmentation A/B",
+          "source_log": "mirror_ab_results.jsonl"
+        },
+        "mcc_v2": {
+          "metric": "macro_top1",
+          "runs": 12,
+          "per_test_signer": {
+            "H": {
+              "mean": 0.8804,
+              "std": 0.0108,
+              "seeds": 3,
+              "values": [
+                0.8762,
+                0.8952,
+                0.8698
+              ]
+            },
+            "L": {
+              "mean": 0.9061,
+              "std": 0.0329,
+              "seeds": 3,
+              "values": [
+                0.8863,
+                0.8796,
+                0.9524
+              ]
+            },
+            "P": {
+              "mean": 0.9284,
+              "std": 0.0379,
+              "seeds": 3,
+              "values": [
+                0.8827,
+                0.9268,
+                0.9756
+              ]
+            },
+            "X": {
+              "mean": 0.8543,
+              "std": 0.0256,
+              "seeds": 3,
+              "values": [
+                0.837,
+                0.8354,
+                0.8905
+              ]
+            }
+          },
+          "overall_mean": 0.8923,
+          "description": "per-signer personalization finetune",
+          "source_log": "mcc_v2_results.jsonl"
+        }
+      }
+    }
+  },
+  "known_limitations": [
+    "Signer X scores lowest in every leave-one-signer-out arm.",
+    "42 fixed sentence classes only; unseen sentences cannot be recognized.",
+    "Not a continuous sign language decoder and not safety-critical.",
+    "The one-shot signer J budget was consumed by the legacy BiGRU model."
+  ]
+}

@@ -53,8 +53,19 @@ app_config.local.json
 !artifacts/realtime/best_current/
 !artifacts/realtime/best_current/.gitkeep
 !artifacts/realtime/best_current/best_model.pt
-!artifacts/realtime/best_current/label_map_v1.json
-!artifacts/realtime/best_current/train_summary_v1.json
-!artifacts/realtime/best_current/launch_summary.json
-!artifacts/realtime/best_current/fixed_sentence_templates_daily30.csv
-!artifacts/realtime/best_current/best_auto_trigger.json
+!artifacts/realtime/best_current/label_map_knee42.json
+!artifacts/realtime/best_current/display_text_map.json
+!artifacts/realtime/best_current/feature_config.json
+!artifacts/realtime/best_current/runtime_config.json
+!artifacts/realtime/best_current/model_card.json
+!artifacts/realtime/best_current/integrity_manifest.sha256
+
+# legacy 27-class daily30 runtime bundle (superseded, kept runnable)
+!artifacts/legacy/
+!artifacts/legacy/daily30_27class/
+!artifacts/legacy/daily30_27class/best_model.pt
+!artifacts/legacy/daily30_27class/label_map_v1.json
+!artifacts/legacy/daily30_27class/train_summary_v1.json
+!artifacts/legacy/daily30_27class/launch_summary.json
+!artifacts/legacy/daily30_27class/fixed_sentence_templates_daily30.csv
+!artifacts/legacy/daily30_27class/best_auto_trigger.json

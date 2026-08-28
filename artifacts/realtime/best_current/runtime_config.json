@@ -1,0 +1,12 @@
+{
+  "sequence_length": 64,
+  "landmark_value_dim": 219,
+  "model_input_dim": 657,
+  "pose_landmarks_removed": [
+    25,
+    26
+  ],
+  "stream": "RGB/color",
+  "frame_contract": "recognition.realtime.knee42_preprocessing",
+  "device": "cpu"
+}

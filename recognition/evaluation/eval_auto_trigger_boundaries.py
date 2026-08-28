@@ -33,7 +33,7 @@ from recognition.realtime.personal_temporal import PersonalTemporalModel, Person
 
 
 PATHS = preview_paths()
-DEFAULT_CACHE_DIR = Path("artifacts") / "realtime" / "best_current"
+DEFAULT_CACHE_DIR = Path("artifacts") / "legacy" / "daily30_27class"
 DEFAULT_END_SEARCH_GRID = {
     "end_hold_sec": [0.25, 0.35, 0.50],
     "end_rest_vote_ratio": [0.75, 0.80, 0.90],

@@ -26,7 +26,7 @@ Auto 模式以站姿為預設：
 
 ## 支援句型
 
-`T01–T08`、`T10–T23`、`T25`、`T27–T30`，共 27 類。完整文字請見 [`fixed_sentence_templates_daily30.csv`](artifacts/realtime/best_current/fixed_sentence_templates_daily30.csv)。
+`T01–T08`、`T10–T23`、`T25`、`T27–T30`，共 27 類。完整文字請見 [`fixed_sentence_templates_daily30.csv`](artifacts/legacy/daily30_27class/fixed_sentence_templates_daily30.csv)。
 
 ## 快速開始
 
@@ -50,10 +50,10 @@ Windows 可攜版解壓後，可直接執行 `start_ivcam.cmd` 或 `SignLanguage
 
 - `models/hand_landmarker.task`
 - `models/pose_landmarker.task`
-- `artifacts/realtime/best_current/best_model.pt`
-- `artifacts/realtime/best_current/label_map_v1.json`
-- `artifacts/realtime/best_current/fixed_sentence_templates_daily30.csv`
-- `artifacts/realtime/best_current/best_auto_trigger.json`
+- `artifacts/legacy/daily30_27class/best_model.pt`
+- `artifacts/legacy/daily30_27class/label_map_v1.json`
+- `artifacts/legacy/daily30_27class/fixed_sentence_templates_daily30.csv`
+- `artifacts/legacy/daily30_27class/best_auto_trigger.json`
 
 缺少任何必要檔案時程式會停止並指出缺少項目，不會建立 SSH 或其他網路連線。
 
