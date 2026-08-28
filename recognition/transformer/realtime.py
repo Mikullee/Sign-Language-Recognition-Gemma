@@ -452,8 +452,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(f"model   : {recognizer.bundle.model_card.get('model_id')} ({len(recognizer.labels)} classes)", flush=True)
     print(f"source  : {source.status}", flush=True)
     print(f"trigger : {args.trigger_config}", flush=True)
-    print("\n站在鏡頭前，上半身與雙手腕完整入鏡，雙手自然垂放身側。")
-    print("系統會先校準靜止基準，之後自動判定每一句的起訖。")
+    print("\n上半身與雙手完整入鏡，先擺好你的「靜止姿勢」不要動。", flush=True)
+    print("系統會用前一秒把它學起來當基準，之後每比完一句回到同一個姿勢即可。", flush=True)
+    print(f"（起訖門檻來自 {args.trigger_config}，該檔是坐姿、手放大腿的取景所校準；", flush=True)
+    print(" 姿勢或取景差異較大時見 docs/auto_trigger_field_notes.md）", flush=True)
     print("按 Q 關閉視窗結束，或 Ctrl-C。\n" if not args.headless else "Ctrl-C 結束。\n")
 
     def report_state(state: str, calibrated: bool, at: float) -> None:
