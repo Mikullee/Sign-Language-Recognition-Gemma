@@ -181,14 +181,22 @@ def recognize_stream(
     max_frames: int | None = None,
     on_result: Any = None,
     on_state: Any = None,
+    on_frame: Any = None,
 ):
-    """Drive one capture source, yielding a Recognition per completed segment."""
+    """Drive one capture source, yielding a Recognition per completed segment.
+
+    ``on_frame(frame, state, calibrated, latest)`` is called for every detected
+    frame, so a caller can draw a preview without this loop knowing about UI.
+    Returning False from it stops the stream, which is how a window's quit key
+    ends the session.
+    """
     controller = AutoKnee42Controller(trigger_config, initial_mode="auto")
     fps = source.fps if source.fps > 0 else 30.0
     raw_frames = 0
     segments = 0
     results: list[Recognition] = []
     previous_state = ""
+    latest: Recognition | None = None
 
     while True:
         ok, frame = source.read()
@@ -214,6 +222,10 @@ def recognize_stream(
             previous_state = controller.state
             on_state(controller.state, controller.calibrated, timestamp_sec)
 
+        if on_frame is not None:
+            if on_frame(frame, observation, controller.state, controller.calibrated, latest) is False:
+                break
+
         if not event.infer:
             continue
 
@@ -234,10 +246,111 @@ def recognize_stream(
             top=top,
         )
         results.append(result)
+        latest = result
         if on_result is not None:
             on_result(result)
 
     return results, raw_frames
+
+
+STATE_COLORS = {
+    "IDLE_BLANK": (170, 170, 170),
+    "SIGNING_ACTIVE": (90, 200, 90),
+    "END_CONFIRM": (70, 190, 235),
+}
+FALLBACK_COLOR = (200, 160, 90)
+
+
+class PreviewWindow:
+    """A camera preview with the skeleton the recognizer actually sees.
+
+    Framing is the single most common reason a session produces nothing: both
+    shoulders have to be visible for a frame to be usable at all. Drawing the
+    landmarks makes that immediately obvious instead of silently dropping frames.
+
+    Chinese needs Pillow, since OpenCV's own text renderer cannot draw CJK. When
+    no CJK font is available the label id is shown rather than mojibake.
+    """
+
+    WINDOW = "Knee42 realtime"
+
+    def __init__(self, quit_keys: str = "q") -> None:
+        self.quit_keys = {ord(key) for key in quit_keys}
+        self._font = self._load_font()
+
+    @staticmethod
+    def _load_font():
+        try:
+            from PIL import ImageFont
+        except ModuleNotFoundError:
+            return None
+        for name in ("msjh.ttc", "msyh.ttc", "mingliu.ttc", "NotoSansCJK-Regular.ttc"):
+            try:
+                return ImageFont.truetype(name, 26)
+            except OSError:
+                continue
+        return None
+
+    def _draw_text(self, frame, text: str, origin: tuple[int, int], color):
+        if self._font is None or text.isascii():
+            import cv2
+
+            cv2.putText(frame, text, origin, cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2, cv2.LINE_AA)
+            return frame
+        import cv2
+        from PIL import Image, ImageDraw
+
+        image = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+        ImageDraw.Draw(image).text(origin, text, font=self._font, fill=tuple(reversed(color)))
+        return cv2.cvtColor(np.asarray(image), cv2.COLOR_RGB2BGR)
+
+    def show(self, frame, observation, state: str, calibrated: bool, latest) -> bool:
+        import cv2
+
+        canvas = frame.copy()
+        height, width = canvas.shape[:2]
+        color = STATE_COLORS.get(state, FALLBACK_COLOR)
+
+        for points, dot in (
+            (observation.display_pose, 3),
+            (observation.display_left_hand, 4),
+            (observation.display_right_hand, 4),
+        ):
+            if points is None:
+                continue
+            for point in np.asarray(points):
+                if not np.isfinite(point[:2]).all():
+                    continue
+                cv2.circle(
+                    canvas,
+                    (int(point[0] * width), int(point[1] * height)),
+                    dot, color, -1, cv2.LINE_AA,
+                )
+
+        cv2.rectangle(canvas, (0, 0), (width, 46), (24, 24, 24), -1)
+        canvas = self._draw_text(
+            canvas,
+            f"{state}   {'calibrated' if calibrated else 'calibrating...'}",
+            (14, 12 if self._font else 32),
+            color,
+        )
+        if latest is not None and latest.top:
+            label, text, prob = latest.top[0]
+            cv2.rectangle(canvas, (0, height - 54), (width, height), (24, 24, 24), -1)
+            canvas = self._draw_text(
+                canvas,
+                f"{text}  {prob:.2f}" if self._font else f"{label} {prob:.2f}",
+                (14, height - 46 if self._font else height - 18),
+                (255, 255, 255),
+            )
+
+        cv2.imshow(self.WINDOW, canvas)
+        return cv2.waitKey(1) & 0xFF not in self.quit_keys
+
+    def close(self) -> None:
+        import cv2
+
+        cv2.destroyWindow(self.WINDOW)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -253,7 +366,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--topk", type=int, default=3)
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--max-frames", type=int, default=None)
-    parser.add_argument("--headless", action="store_true", help="no preview window")
+    parser.add_argument(
+        "--headless", action="store_true", help="console only, no preview window"
+    )
     args = parser.parse_args(argv)
 
     import cv2
@@ -270,7 +385,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(f"source  : {source.status}")
     print(f"trigger : {args.trigger_config}")
     print("\n站在鏡頭前，上半身與雙手腕完整入鏡，雙手自然垂放身側。")
-    print("系統會先校準靜止基準，之後自動判定每一句的起訖。Ctrl-C 結束。\n")
+    print("系統會先校準靜止基準，之後自動判定每一句的起訖。")
+    print("按 Q 關閉視窗結束，或 Ctrl-C。\n" if not args.headless else "Ctrl-C 結束。\n")
 
     def report_state(state: str, calibrated: bool, at: float) -> None:
         mark = "calibrated" if calibrated else "calibrating"
@@ -279,6 +395,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     def report_result(result: Recognition) -> None:
         print(result.format(), flush=True)
 
+    preview = None if args.headless else PreviewWindow()
     started = time.perf_counter()
     try:
         with detectors_for(args) as detectors:
@@ -291,13 +408,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                 topk=args.topk,
                 max_frames=args.max_frames,
                 on_result=report_result,
-                on_state=None if args.headless else report_state,
+                on_state=report_state,
+                on_frame=None if preview is None else preview.show,
             )
     except KeyboardInterrupt:
         print("\n[exit] stopped")
         return 0
     finally:
         source.release()
+        if preview is not None:
+            preview.close()
 
     elapsed = max(time.perf_counter() - started, 1e-6)
     print(f"\n{len(results)} segment(s) from {raw_frames} frames in {elapsed:.1f}s "
