@@ -23,6 +23,22 @@ Usage
     python -m recognition.transformer.realtime                 # first camera
     python -m recognition.transformer.realtime --camera 1
     python -m recognition.transformer.realtime --video clip.mp4 --headless
+
+Expected noise
+--------------
+MediaPipe's native library writes these to stderr on every start. None of them
+indicate a problem, and none are suppressible from Python -- they come from the
+C++ side, which ignores ``GLOG_minloglevel``. Redirecting the file descriptor
+would hide real errors too, so they are documented rather than swallowed:
+
+    INFO: Created TensorFlow Lite XNNPACK delegate for CPU.
+    W0000 ... inference_feedback_manager.cc ... Disabling support for feedback tensors.
+    W0000 ... landmark_projection_calculator.cc ... Using NORM_RECT without IMAGE_DIMENSIONS
+    E0000 ... portable_clearcut_uploader.cc ... Failed to send to clearcut
+
+The last one is MediaPipe failing to upload usage telemetry to Google. It is
+logged at error level despite being unrelated to recognition, and appears only
+intermittently.
 """
 from __future__ import annotations
 

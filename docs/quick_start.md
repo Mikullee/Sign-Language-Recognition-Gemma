@@ -52,7 +52,22 @@ python -m recognition.transformer.realtime
 （畫面會顯示 `calibrating` → `calibrated`），之後**每一句的起訖都自動判定**，不必按鍵。
 一句結束就印出 top-3，接著自動回到待命。`Ctrl-C` 結束。
 
-指定攝影機用 `--camera 1`；沒有畫面預覽需求加 `--headless`。
+指定攝影機用 `--camera 1`；不要視窗加 `--headless`。
+
+### 啟動時的 MediaPipe 訊息是正常的
+
+每次啟動都會看到這幾行，**都不是問題**：
+
+```text
+INFO: Created TensorFlow Lite XNNPACK delegate for CPU.
+W0000 ... inference_feedback_manager.cc ... Disabling support for feedback tensors.
+W0000 ... landmark_projection_calculator.cc ... Using NORM_RECT without IMAGE_DIMENSIONS
+E0000 ... portable_clearcut_uploader.cc ... Failed to send to clearcut
+```
+
+最後那行是 MediaPipe 想把使用統計上傳給 Google 失敗，跟辨識無關，只是被記成 error 等級。
+這些訊息由原生 C++ 直接寫 stderr，`GLOG_minloglevel` 壓不掉；要壓只能重導整個檔案描述子，
+那會連真正的錯誤一起藏起來，所以選擇不壓。
 
 ## 用 CLI 辨識單支影片
 
