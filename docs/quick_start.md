@@ -42,6 +42,18 @@ python -m webservice.server --port 8642
 
 攝影機模式另需 MediaPipe 的網頁資產，設定見 [`webservice/README.md`](../webservice/README.md)。
 
+## 相機即時辨識
+
+```powershell
+python -m recognition.transformer.realtime
+```
+
+站到鏡頭前、上半身與雙手腕完整入鏡、雙手自然垂放身側。系統會先用前一秒校準靜止基準
+（畫面會顯示 `calibrating` → `calibrated`），之後**每一句的起訖都自動判定**，不必按鍵。
+一句結束就印出 top-3，接著自動回到待命。`Ctrl-C` 結束。
+
+指定攝影機用 `--camera 1`；沒有畫面預覽需求加 `--headless`。
+
 ## 用 CLI 辨識單支影片
 
 ```powershell
@@ -60,8 +72,8 @@ python -m recognition.realtime.knee42_ivcam --bundle <v11-bundle-dir>
 ```
 
 > **沒有 Windows 可攜版。** 原本的可攜版打包的是 27 類 daily30 app，
-> 該子系統已於 v12 移除；Transformer 的即時程式尚未撰寫。
-> 要即時操作請用網頁測試站的攝影機模式。
+> 該子系統已於 v12 移除，而現行 Transformer 還沒有對應的 PyInstaller 設定。
+> 即時辨識本身可以從原始碼執行，見上面「相機即時辨識」。
 
 ## 重新校準自動起訖
 

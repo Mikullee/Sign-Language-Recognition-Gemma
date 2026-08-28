@@ -29,13 +29,25 @@
   `best_dev_top1` 僅 0.418,類別集合與 42 類 Knee42 無關,留著只會讓
   「哪一顆才是模型」持續混淆
 - **副作用:Windows 可攜版停止**。其進入點就是 27 類 app,Transformer 的
-  即時程式尚未撰寫;現階段改用網頁測試站或 CLI
+  沒有對應的 PyInstaller 設定;即時辨識本身改由 `recognition.transformer.realtime`
+  從原始碼執行
 - `daily30_sentence_model_utils.py` 更名為 `bigru_sentence_model.py`——
   它其實是 legacy **Knee42** BiGRU 的分類器,原檔名有誤導性
 - auto-trigger 邊界校準工具保留,但拿掉綁死 daily30 的分類對照;
   225 維 trigger 向量改由共用的 `knee42_preprocessing` 提供(已驗證兩者輸出完全相同)。
   **`install_best_config_if_passed` 的門檻因此變寬**:不再檢查分類回歸,只看邊界是否全數通過
 - 測試由 175 增為 221 項
+
+### 相機即時辨識(Transformer)
+
+- 新增 `recognition/transformer/realtime.py`:把既有的 auto-trigger 狀態機接到
+  Transformer 辨識器。兩邊都沒有改動——狀態機的門檻是在真實錄影上校準過的,
+  辨識器是已驗證的 bundle 載入路徑;缺的只是中間那條線
+- 段落緩衝存的是帶 NaN 的肩寬正規化座標,正好就是 Transformer 的輸入合約,
+  遮罩在此不使用(內插與重取樣都在 `materialize_sequence` 裡)
+- 實測:靜止 → 比劃 → 靜止的影片會走完
+  `IDLE_BLANK → SIGNING_ACTIVE → END_CONFIRM → 輸出 → IDLE_BLANK`,
+  邊界落在 2.52–4.27 秒(實際比劃 2.50–4.23),pre-roll 有把起手收進來
 
 ## v0.1.0
 

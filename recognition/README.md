@@ -32,6 +32,7 @@ MediaPipe 結果 → 移除 pose 25/26 → 肩寬正規化 → **219 個值 + 21
 
 - `transformer/recognizer.py` — bundle 驗證 + 推論
 - `transformer/segmentation.py` — 離線影片切段與整段辨識
+- `transformer/realtime.py` — 相機即時辨識,自動判定起訖
 - `training/knee42_transformer.py` — 留一簽者 / 全簽者訓練
 - `realtime/knee42_ivcam.py` — legacy BiGRU 即時辨識(需自備 v11 bundle)
 - `evaluation/eval_auto_trigger_boundaries.py` — auto-trigger 邊界校準

@@ -586,10 +586,17 @@ python scripts/build_knee42_transformer_bundle.py \
 |---|---|---|
 | [`webservice/`](webservice/) | 瀏覽器測試站:攝影機、上傳影片、貼連結 | Python 3.12、`.task` 模型 |
 | [`scripts/analyze_knee42_video.py`](scripts/analyze_knee42_video.py) | 單支影片辨識(CLI) | 同上 |
-| `recognition.realtime.knee42_ivcam` | 相機即時辨識(**legacy BiGRU**,非現行模型) | 自備 v11 bundle + `.task` |
+| [`recognition.transformer.realtime`](recognition/transformer/realtime.py) | **相機即時辨識,自動判定起訖** | Python 3.12、`.task` 模型 |
+| `recognition.realtime.knee42_ivcam` | 相機即時辨識(legacy BiGRU,非現行模型) | 自備 v11 bundle + `.task` |
 
-> 目前**沒有跑 Transformer 的即時程式**。27 類 daily30 子系統於 v12 移除時,
-> Windows 可攜版一併停止;Transformer 的即時入口尚未撰寫。要即時操作請用網頁測試站的攝影機模式。
+即時模式:
+
+```bash
+python -m recognition.transformer.realtime
+```
+
+站到鏡頭前、雙手垂放身側,系統會先用前一秒校準靜止基準,之後每一句的起訖都自動判定,
+不必按任何鍵。段落結束就印出 top-3,然後自動回到待命等下一句。
 
 最快的驗證方式是開網頁測試站:
 
@@ -937,4 +944,5 @@ v0.1.0 時期的固定句型模型（`T01`–`T30`）與其整套程式碼已於
 文件卻描述 42 類系統的根源。
 
 **副作用:目前沒有 Windows 可攜版可打包。** 該版本的進入點就是 27 類 app,
-Transformer 的即時程式尚未撰寫。現階段請改用網頁測試站或 CLI（§5.0）。
+而現行 Transformer 沒有對應的 PyInstaller 設定。即時辨識本身**沒有受影響**——
+`recognition.transformer.realtime` 從原始碼執行即可(§5.0),缺的只是打包成單一 exe。
