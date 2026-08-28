@@ -397,9 +397,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         else open_camera(args.camera, cv2_module=cv2)
     )
 
-    print(f"model   : {recognizer.bundle.model_card.get('model_id')} ({len(recognizer.labels)} classes)")
-    print(f"source  : {source.status}")
-    print(f"trigger : {args.trigger_config}")
+    # stderr is unbuffered and stdout is not, so MediaPipe's native logging
+    # arrives ahead of anything printed here unless these are flushed. Seeing
+    # only the noise makes a working start look like a failed one.
+    print(f"model   : {recognizer.bundle.model_card.get('model_id')} ({len(recognizer.labels)} classes)", flush=True)
+    print(f"source  : {source.status}", flush=True)
+    print(f"trigger : {args.trigger_config}", flush=True)
     print("\n站在鏡頭前，上半身與雙手腕完整入鏡，雙手自然垂放身側。")
     print("系統會先校準靜止基準，之後自動判定每一句的起訖。")
     print("按 Q 關閉視窗結束，或 Ctrl-C。\n" if not args.headless else "Ctrl-C 結束。\n")
