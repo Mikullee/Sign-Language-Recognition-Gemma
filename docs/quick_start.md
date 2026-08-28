@@ -17,8 +17,15 @@ python -m pip install -r requirements-transformer.txt
 python -c "from recognition.transformer.recognizer import Knee42TransformerRecognizer as R; r = R('artifacts/realtime/best_current'); print(len(r.labels), '類載入成功')"
 ```
 
-再把兩個 MediaPipe `.task` 放進 `models/`（repository 不散布，雜湊見
-[`models/README.md`](../models/README.md)）。**pose 必須是 lite 版。**
+再取得兩個 MediaPipe `.task`：
+
+```powershell
+python scripts/fetch_mediapipe_models.py
+```
+
+它們不隨 repository 散布（Google 的模型資產有自己的條款，見
+[`THIRD_PARTY_NOTICES.md`](../THIRD_PARTY_NOTICES.md)），腳本會從官方位置下載
+並核對 SHA-256——**pose 必須是 lite 版**，抓錯不會報錯只會讓準確率下降。
 
 ## 用網頁測試站
 

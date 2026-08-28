@@ -18,6 +18,17 @@ MediaPipe 的 `.task` 模型檔放這裡。**本 repository 不散布這兩個�
 
 用錯版本不會報錯,只會讓準確率無聲下降——landmark 分布跟訓練時不一致。
 
+## 自動取得
+
+```bash
+python scripts/fetch_mediapipe_models.py
+```
+
+腳本會從 Google 官方位置下載,並用上表的 SHA-256 核對。**對不上就刪檔並報錯**,
+不會留下一個看起來能用、實際上分布不對的模型。
+
+手動核對:
+
 ```bash
 sha256sum models/hand_landmarker.task models/pose_landmarker.task
 ```

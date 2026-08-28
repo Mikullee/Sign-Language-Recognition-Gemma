@@ -624,6 +624,14 @@ python -m pip install -r requirements-transformer.txt
 | numpy | 2.5.0 |
 | opencv-python | 5.0.0.93 |
 
+再取得兩個 MediaPipe `.task`（不隨 repository 散布，見 §4.3）：
+
+```bash
+python scripts/fetch_mediapipe_models.py
+```
+
+到這裡就能跑了——42 類模型本身已經在 `artifacts/realtime/best_current/`。
+
 #### 重現訓練（需 Linux／CUDA）
 
 ```bash
