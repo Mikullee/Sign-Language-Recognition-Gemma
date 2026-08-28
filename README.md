@@ -6,7 +6,7 @@
 ![Python](https://img.shields.io/badge/Python-3.12-blue)
 ![PyTorch](https://img.shields.io/badge/PyTorch-Transformer-ee4c2c)
 ![MediaPipe](https://img.shields.io/badge/MediaPipe-Pose%20%2B%20Hands-00bfa5)
-![Platform](https://img.shields.io/badge/Platform-Windows%2010%20%2F%2011-0078d4)
+![Runtime](https://img.shields.io/badge/Runtime-CPU%20only-0078d4)
 ![Classes](https://img.shields.io/badge/Classes-42-6c63ff)
 ![Gate](https://img.shields.io/badge/Model%20Gate-PROVISIONAL-b8860b)
 ![Code](https://img.shields.io/badge/Code-MIT-green)
