@@ -1,10 +1,10 @@
 # Sign-Language-Recognition-Gemma — Knee42
 
 > 42 類固定句型台灣手語辨識系統
-> 單一 RGB 攝影機 → MediaPipe 骨架 → BiGRU → Top-1／Top-3 中文句意
+> 單一 RGB 攝影機 → MediaPipe 骨架 → Transformer encoder → Top-1／Top-3 中文句意
 
-![Python](https://img.shields.io/badge/Python-3.10-blue)
-![PyTorch](https://img.shields.io/badge/PyTorch-BiGRU-ee4c2c)
+![Python](https://img.shields.io/badge/Python-3.12-blue)
+![PyTorch](https://img.shields.io/badge/PyTorch-Transformer-ee4c2c)
 ![MediaPipe](https://img.shields.io/badge/MediaPipe-Pose%20%2B%20Hands-00bfa5)
 ![Platform](https://img.shields.io/badge/Platform-Windows%2010%20%2F%2011-0078d4)
 ![Classes](https://img.shields.io/badge/Classes-42-6c63ff)
@@ -12,7 +12,7 @@
 ![Code](https://img.shields.io/badge/Code-MIT-green)
 ![Model](https://img.shields.io/badge/Model-CC%20BY--NC%204.0-orange)
 
-**本 repository 名稱保留 `Gemma`，但目前辨識核心是 MediaPipe ＋ BiGRU，與 Google Gemma 無關。** 生成端整合屬後續研究方向。
+**本 repository 名稱保留 `Gemma`，但目前辨識核心是 MediaPipe ＋ Transformer encoder，與 Google Gemma 無關。** 生成端整合屬後續研究方向。
 
 ---
 
@@ -23,7 +23,7 @@
 2. [目前辨識效果](#2-目前辨識效果)
 3. [系統流程與架構](#3-系統流程與架構)
    — [一幀 → 438 維](#32-步驟一一幀畫面--219-個值--219-個遮罩)
-   · [一段 → 64×438](#34-步驟三一整段--64--438)
+   · [一段 → 64×657](#34-步驟三一整段--64--657)
    · [為什麼是 64](#35-為什麼是-64)
    · [訓練 vs 即時](#36-訓練路徑與即時路徑的差異)
 4. [公開模型](#4-公開模型)
@@ -81,9 +81,90 @@ Knee42 是一套**離線執行**的孤立手語句型辨識系統。使用者對
 
 ## 2. 目前辨識效果
 
-### 2.1 正式指標
+### 2.1 兩條辨識路徑
 
-本 repository 發布的模型為 **MODEL v11**，來自訓練回合 `20260818_134407`、候選 `round1_seed44`、best epoch 29。
+repository 同時保留兩個模型。**現行路徑是 Transformer**，BiGRU 保留為 legacy 以便對照與回退。
+
+| | 現行（預設） | Legacy |
+|---|---|---|
+| 模型 | 4 層 Transformer encoder | 2 層 BiGRU |
+| 每幀輸入 | 219 值 → 位置＋速度＋加速度 | 219 值 + 219 遮罩 |
+| 段落輸入 | `64 × 657` | `64 × 438` |
+| 程式進入點 | [`recognition/transformer/`](recognition/transformer/) | [`recognition/realtime/knee42_ivcam.py`](recognition/realtime/knee42_ivcam.py) |
+| Bundle | `artifacts/realtime/best_current/` | Release `knee42-model-v11.zip` |
+
+兩者共用同一份**幀層合約**（MediaPipe → 移除 pose 25/26 → 肩寬正規化 → 219 值 + 遮罩），
+實作於 [`recognition/realtime/knee42_preprocessing.py`](recognition/realtime/knee42_preprocessing.py)，
+分岔點在其後的序列組裝。
+
+### 2.2 現行 Transformer：可宣稱的指標
+
+下表為**留一簽者**（leave-one-signer-out）結果：測試簽者完全不參與訓練，
+4 位簽者 × 3 個種子 = 每組 12 次訓練，指標為 macro top-1（各類等權）。
+
+| 實驗組 | H | L | P | X | **平均** |
+|---|---:|---:|---:|---:|---:|
+| 無預訓練基線 | .738 | .601 | .656 | .472 | **.617** |
+| MOC 預訓練 + 微調 | .827 | .861 | .821 | .729 | **.809** |
+| 原型分類頭 | .858 | .885 | .810 | .693 | **.812** |
+| 鏡像增強（p = 0.3） | .796 | .873 | .845 | .656 | **.793** |
+| 個人化微調 | .880 | .906 | .928 | .854 | **.892** |
+
+三項可以直接讀出來的結論：
+
+1. **MOC 預訓練是最大的單一貢獻**：`.617 → .809`，**+19.2 個百分點**。
+2. **個人化微調再加 +8.3 pp**（`.809 → .892`），但前提是取得目標使用者本人的資料。
+3. **鏡像增強沒有幫助**：`.793` 低於不做鏡像的 `.809`，兩種比例（0.3／0.5）皆然。
+
+**signer X 在每一組都是最低分**（.472 / .729 / .693 / .656 / .854）。
+這是跨全部實驗一致的現象，指向該簽者的動作風格與其餘三位差異較大，
+是後續補資料時應優先處理的方向。
+
+所有數字由 [`scripts/aggregate_knee42_loso_runs.py`](scripts/aggregate_knee42_loso_runs.py)
+從原始訓練 log 重算，完整結果含各種子原始值存於
+[`docs/evaluation/knee42_loso_metrics.json`](docs/evaluation/knee42_loso_metrics.json)，**可自行驗證**。
+
+#### 與 legacy BiGRU 的同條件比較
+
+v11 BiGRU 與上表都把 signer H 完全排除在訓練之外，因此可以直接並列：
+
+| signer H（兩者皆完全排除） | macro top-1 |
+|---|---:|
+| Legacy BiGRU（v11） | 76.35% |
+| **Transformer（MOC 預訓練 + 微調）** | **82.7%** |
+| Transformer（原型分類頭） | 85.8% |
+
+換模型帶來 **+6.4 個百分點**。
+
+### 2.3 為什麼發布的權重沒有保留測試分數
+
+發布的 `best_model.pt` 是在方法通過上述留一簽者驗證之後，
+**用全部四位簽者重新訓練**的版本（見 [`model_card.json`](artifacts/realtime/best_current/model_card.json)）。
+因此：
+
+- checkpoint 內的 `val_macro_mixed = 1.0` 來自**不分簽者的隨機 12% 切分**，
+  驗證集裡的每位簽者也都在訓練集裡。這是樂觀值，**不是準確率，不可引用**。
+- H／L／P／X 四位都在它的訓練資料中，**無法用來重新量測**。
+- signer J 的一次性測試額度已由 legacy BiGRU 消耗（`j_once_v6/CONSUMED.json`），不得再用。
+
+所以 §2.2 的數字描述的是**方法**（在個別留一模型上量得），不是這顆權重本身。
+要給這顆權重一個獨立分數，需要新的、未參與訓練的資料。
+
+### 2.4 模型驗收狀態：`PROVISIONAL`
+
+未達 READY 的理由：
+
+1. 發布權重缺乏獨立保留測試集（見 §2.3）。
+2. 留一簽者結果在 signer X 上明顯偏低（.729），跨簽者穩定性不足。
+3. 實機 IVCAM 硬體驗收待完成。
+
+軟體管線與可重現性證據皆已通過：Train/Dev 影片稽核 2,252 列全數 PASS、
+特徵快取 2,252/2,252 驗證通過、Transformer 推論路徑與上游參考實作在
+300 筆特徵樣本上**逐位元一致**（機率向量最大絕對誤差 0.000e+00）。
+
+### 2.5 Legacy BiGRU（v11）的紀錄
+
+以下為 legacy 路徑的指標，保留以供對照。**它不是目前的辨識模型。**
 
 | 指標 | 值 | 說明 |
 |---|---:|---|
@@ -95,21 +176,9 @@ Knee42 是一套**離線執行**的孤立手語句型辨識系統。使用者對
 | J Top-3 | 79.39% | |
 | Round 1 三種子 Dev Macro | 75.39 / 69.48 / 76.35 | mean 73.74、population std **3.04 pp** |
 
-採 Macro（各類等權）而非 overall accuracy，以避免整體指標被樣本較多或較易的類別主導。
+來自訓練回合 `20260818_134407`、候選 `round1_seed44`、best epoch 29。
 
-> **重要：Dev 與 J 的性質不同。** Dev 被用來挑選回合、種子與 checkpoint，因此帶有樂觀偏誤；**J 是唯一未參與任何選擇的估計值**。J 為一次性測試集，額度已於本回合消耗（`j_once_v6/CONSUMED.json`），**不得再用於評估任何後續模型**。
-
-### 2.2 模型驗收狀態：`PROVISIONAL`
-
-未達 READY 的理由：
-
-1. 8 個類別的鎖定 J 準確率為零（`K42_01` 你好、`K42_04` 謝謝、`K42_06` 再見、`K42_08` 請慢一點、`K42_11` 我不知道、`K42_28` 我要這個、`K42_30` 新北、`K42_37` 花蓮）
-2. Round 1 三種子變異達 3.04 個百分點，結果穩定性不足
-3. 實機 IVCAM 硬體驗收待完成
-
-軟體管線、封裝與可重現性證據皆已通過：Train/Dev 影片稽核 2,252 列全數 PASS、特徵快取 2,252/2,252 驗證通過、26 項封裝測試通過。
-
-### 2.3 逐類三方對照
+#### 逐類三方對照（legacy BiGRU）
 
 單一準確率無法說明「問題出在哪一層」。下表並排三個獨立來源——Dev（驗證 signer H）、J（一次性測試 signer J）、**即時檢核**（組員以即時模式逐類實測，原始紀錄見 [`docs/evaluation/live_check_42.xlsx`](docs/evaluation/live_check_42.xlsx)）。
 
@@ -197,8 +266,8 @@ flowchart LR
     G --> H["依時間戳暫存"]
     F -->|"決定取哪些幀"| I["取出該段落的特徵"]
     H -->|"提供特徵"| I
-    I --> J["均勻取 64 幀"]
-    J --> K["64 × 438 → BiGRU"]
+    I --> J["重取樣 64 幀<br/>串接速度與加速度"]
+    J --> K["64 × 657 → Transformer"]
     K --> L["Top-1 / Top-3 + 中文句意"]
 ```
 
@@ -247,9 +316,33 @@ points[有效點] = (points[有效點] − center) / scale
 
 正規化後，「手抬到肩膀高度」在任何人身上都會換算成相近的數值，模型學到的才是動作本身而不是某個人的身材。
 
-### 3.4 步驟三：一整段 → `64 × 438`
+### 3.4 步驟三：一整段 → `64 × 657`
 
-一句手語的實際長度不固定（本資料集約 1.1–4.4 秒），但模型只接受固定尺寸輸入。`materialize_sequence()` 負責這一步，核心只有四行：
+一句手語的實際長度不固定（本資料集約 1.1–4.4 秒），但模型只接受固定尺寸輸入。
+**這是兩條路徑唯一分岔的地方**，前面的幀層合約完全共用。
+
+#### 現行 Transformer：`recognition/transformer/features.py`
+
+```python
+filled     = interp_missing(values)                         # NaN 沿時間軸線性內插
+positions  = resample(filled, 64)                           # 重取樣到 64 幀
+velocity   = np.diff(positions, axis=0, prepend=positions[:1])
+accel      = np.diff(velocity,  axis=0, prepend=velocity[:1])
+return np.concatenate([positions, velocity, accel], axis=1)  # 64 × 657
+```
+
+**內插而非遮罩。** 缺失座標沿時間軸由前後有效值線性內插；整個維度都沒觀測到才填 0。
+模型不再收到遮罩通道，改為直接看到連續的軌跡。
+
+**重取樣而非取樣。** `resample` 做的是線性內插，不是取最近幀——短段落被平滑地拉長，
+而不是把同一幀重複貼上。
+
+**速度與加速度。** 一階與二階差分**在重取樣之後**計算，因此單位是「每重取樣幀」。
+兩個通道的第 0 格重複自身首值以維持長度。位置 219 + 速度 219 + 加速度 219 = **每幀 657 維**。
+
+**不做標準化。** 肩寬正規化後的座標已在可比尺度上，這條路徑不再套用 train-only standardizer。
+
+#### Legacy BiGRU：`materialize_sequence()`
 
 ```python
 indices      = np.rint(np.linspace(0, len(values) - 1, 64)).astype(np.int64)
@@ -272,6 +365,8 @@ return np.concatenate((standardized, sampled_mask.astype(np.float32)), axis=1)
 **中性填補。** 缺失位置在標準化**之後**填 `0.0`。標準化空間裡的 0 就是**訓練集平均**——也就是「最沒有資訊量」的值。模型不會因為缺失而收到一個偏離的訊號，同時遮罩會告訴它「這格是補的，不要當真」。這是遮罩與填補搭配使用的完整理由：**填補提供一個安全的預設值，遮罩保留「這是補的」這項事實。**
 
 **串接。** 219 個標準化後的值 + 219 個遮罩（轉成 0.0/1.0）= **每幀 438 維**，整段就是 `64 × 438` = 28,032 個數值。
+
+> 兩條路徑對「缺失值」的處理哲學相反：legacy 保留遮罩讓模型自己判斷，現行則直接內插補上軌跡。這也是為什麼兩者的 checkpoint **不可互換**，bundle 各自帶有 `feature_config.json` 並在載入時強制驗證。
 
 ### 3.5 為什麼是 64
 
@@ -333,6 +428,26 @@ return np.concatenate((standardized, sampled_mask.astype(np.float32)), axis=1)
 
 ### 3.7 模型
 
+#### 現行：Transformer encoder
+
+| 項目 | 設定 |
+|---|---|
+| Backbone | 4-layer Transformer encoder（`norm_first`，pre-LN） |
+| Model dim / Heads | 256 / 8 |
+| Feedforward | 512（= 2 × model dim） |
+| 位置編碼 | 可學習，形狀 `[1, 64, 256]` |
+| Dropout | 0.1 |
+| Pooling | temporal mean |
+| 分類頭 | LayerNorm → Linear → 42 logits |
+| 參數量 | 2,304,554 |
+| 預訓練 | MOC tsl-core 215 詞分類器，換頭後微調 |
+| 推論成本 | CPU 單段約 2–4 ms，不需要 GPU |
+
+自注意力可直接連結段落內任意兩個時間點，這在手語裡對應「起手位置」與「收尾手形」
+之間的長距依賴；BiGRU 只能靠隱藏狀態逐步攜帶這項資訊。
+
+#### Legacy：BiGRU
+
 | 項目 | 設定 |
 |---|---|
 | Backbone | 2-layer Bidirectional GRU |
@@ -374,34 +489,50 @@ return np.concatenate((standardized, sampled_mask.astype(np.float32)), axis=1)
 
 ## 4. 公開模型
 
-### 4.1 Release 附件
+### 4.1 模型 bundle
 
-自 [Releases](../../releases) 取得 `v1.0.0-v13`：
+現行模型**直接放在 repository 內**，clone 下來即可使用，不需要另外下載：
 
-| 檔案 | 內容 | 大小 |
-|---|---|---|
-| `knee42-model-v11.zip` | 研究模型 bundle（權重、label map、standardizer、feature config、中文顯示對照） | ~3 MB |
-| `SHA256SUMS.txt` | Release 附件的 SHA-256 | — |
-
-先驗證完整性：
-
-```powershell
-Get-FileHash .\knee42-model-v11.zip -Algorithm SHA256
+```
+artifacts/realtime/best_current/
 ```
 
-本次附件的 SHA-256 應為 `af45a4a50fc67755dd86be1b47fe975120e47a1b9f6850232e294685dd4ac8df`。
+| 檔案 | SHA-256 |
+|---|---|
+| `best_model.pt` | `b72838ac6365d1ad1a8e984716de2c378f046c9f49e67a0581990c6a7d395fb7` |
+| `label_map_knee42.json` | `18c8121f8cdfafaf957ba07c7b3181d51055ffdd71493ba27b91c2c7260339b9` |
+| `display_text_map.json` | `a2d2e008cf6232b29ee04596e1e1bb418ccf0b0587f41e42471cf22e3b2073a3` |
+| `feature_config.json` | `e008475815958769089895ace9d34fdc2e96856488ad675e1279952b9077e430` |
+| `runtime_config.json` | `b5c53b27db37caaf852d1245ca4ce82ab1dd16ba7299ea138fef2b3dcb2404a2` |
+| `model_card.json` | `11b4657e6aaeb239cdf939707c339ffb41e4ce4fc98d6fae8cdc28a0dc7959d2` |
 
-bundle 內各檔案的固定雜湊：
+同一份清單存於 bundle 內的 `integrity_manifest.sha256`，載入時逐項驗證；
+JSON 以 CRLF→LF 正規化後計算雜湊，因此 Windows 與 Linux checkout 結果一致。
 
-```text
-best_model.pt                 8e35adedae1a03ad5644872769821d2966bb7613b5a1e070996929c7e5f2e492
-standardizer_train_only.npz   c252b4fdc9fa83179a75bb4726bd0062ebbd796a3beae35f3d47483d2456c391
-label_map_knee42.json         18c8121f8cdfafaf957ba07c7b3181d51055ffdd71493ba27b91c2c7260339b9
-feature_config.json           c9670b77a6ab44d766559497e6dbf61a8da9ebfeca45e4b77c0640e596d0a5dc
-display_text_map.json         a2d2e008cf6232b29ee04596e1e1bb418ccf0b0587f41e42471cf22e3b2073a3
+`label_map_knee42.json` 與 `display_text_map.json` 的雜湊**與 legacy v11 bundle 完全相同**，
+代表兩條路徑共用同一份 42 類定義與中文對照，換模型不會動到類別語意。
+
+bundle 可由 checkpoint 重建，重建結果應得到相同雜湊：
+
+```bash
+python scripts/build_knee42_transformer_bundle.py \
+    --checkpoint <knee42_final_v2.pt> \
+    --label-map <label_map_knee42.json> \
+    --display-map <display_text_map.json> \
+    --metrics docs/evaluation/knee42_loso_metrics.json \
+    --out artifacts/realtime/best_current
 ```
 
-### 4.2 公開範圍
+**使用前請先讀 [`model_card.json`](artifacts/realtime/best_current/model_card.json)**，
+其中記載這顆權重的訓練切分與「為什麼沒有保留測試分數」（§2.3）。
+
+### 4.2 Legacy 模型
+
+27 類 daily30 BiGRU 位於 [`artifacts/legacy/daily30_27class/`](artifacts/legacy/daily30_27class/)。
+42 類 v11 BiGRU 仍由 [Releases](../../releases) 的 `v1.0.0-v13` 提供
+（`knee42-model-v11.zip`，SHA-256 `af45a4a50fc67755dd86be1b47fe975120e47a1b9f6850232e294685dd4ac8df`）。
+
+### 4.3 公開範圍
 
 這次公開的是**模型與方法**，不是可直接啟動的 Windows 應用程式。repository 另提供 v13 的訓練、評估、前處理與即時推論原始碼，供審閱方法與重現研究使用；但公開 Release 不含下列項目：
 
@@ -417,11 +548,29 @@ display_text_map.json         a2d2e008cf6232b29ee04596e1e1bb418ccf0b0587f41e4247
 
 ### 5.1 環境
 
-重現訓練需使用相容的 **Linux／CUDA** 主機：
+#### 推論（Transformer，純 CPU）
+
+現行路徑不需要 GPU。以下版本組合已實測可運作：
 
 ```bash
-conda create -n knee42 python=3.10 pip -y
+conda create -n knee42 python=3.12 -y
 conda activate knee42
+python -m pip install -r requirements-transformer.txt
+```
+
+| 套件 | 版本 |
+|---|---|
+| Python | 3.12 |
+| torch | 2.13.0（CPU 版即可） |
+| mediapipe | 0.10.35 |
+| numpy | 2.5.0 |
+| opencv-python | 5.0.0.93 |
+
+#### 重現訓練（需 Linux／CUDA）
+
+```bash
+conda create -n knee42-train python=3.10 pip -y
+conda activate knee42-train
 python -m pip install -r requirements.lock.txt
 ```
 
@@ -560,6 +709,11 @@ Train/Dev 影片稽核結果：獨立列 2,252（Train 1,634、Dev 618），最�
 | **v13** | 安全邊界策略（pre-roll 0.60、回溯錨點、手腕 fallback）；E2 版面凍結 | **本次發布的版本** |
 | v14 | 以真實時間戳取代合成時鐘；擷取／推論／UI／錄影四執行緒分離 | 修正錄影加速問題 |
 | v15 | 即時特徵快取；新增 adaptive re-arm 狀態 | 段落召回劣化，未發布 |
+| **v12 模型** | 辨識核心改為 4 層 Transformer encoder；`64 × 438` → `64 × 657`（位置／速度／加速度）；MOC 215 詞預訓練 | **現行模型**，BiGRU 轉為 legacy |
+
+**為什麼換成 Transformer。** 在同一組留一簽者協定下，signer H 的 macro top-1 由 BiGRU 的
+76.35% 提升到 82.7%（§2.2）。主要來源不是架構本身，而是 MOC 215 詞語料的預訓練——
+無預訓練的 Transformer 基線只有 .617，加上預訓練後才到 .809。
 
 **為什麼發布 v13 而不是更新的版本。** v13 存在一項已定位的計時缺陷（合成時鐘導致錄影播放加速約 1.71 倍），但該缺陷的作用域限於錄影保真度與設定值語意，未改變送入模型的特徵契約，且時鐘在 v13 內部是自洽的——所有門檻皆於同一時鐘下實測校準，分段行為穩定。v15 則在離線 A/B 重播中出現整段漏切（12 段對 v13 的 14 段，並有 10.6 秒與 11.4 秒的完全不觸發空窗），段落召回劣於 v13。在辨識可用性的優先序下，v13 為現行運作基準。
 
@@ -656,4 +810,15 @@ Train/Dev 影片稽核結果：獨立列 2,252（Train 1,634、Dev 618），最�
 
 ## Legacy
 
-原本的 27 類固定句型版本規劃保留於 [`docs/legacy/`](docs/legacy/)。Knee42 v1.0.0 不會把舊模型誤標成 42 類模型。
+repository 保留兩份已被取代但仍可執行的資產，**兩者都不是目前的辨識模型**：
+
+| 資產 | 位置 | 說明 |
+|---|---|---|
+| 27 類 daily30 BiGRU | [`artifacts/legacy/daily30_27class/`](artifacts/legacy/daily30_27class/) | v0.1.0 時期的固定句型模型（`T01`–`T30`，不含 `T09`/`T24`/`T26`），`best_dev_top1` 0.418。auto-trigger 的離線邊界評估仍以它為對照基準。 |
+| 27 類版本文件 | [`docs/legacy/`](docs/legacy/) | v0.1.0 的說明與快速開始 |
+| 42 類 v11 BiGRU | Release `v1.0.0-v13` | 上一代 42 類模型，指標見 §2.5 |
+
+**這三者的類別集合與特徵合約各不相同，checkpoint 不可互換。**
+載入時的 `feature_config.json` 驗證會擋下錯配，不會靜默地跑出錯誤結果——
+這正是先前 `artifacts/realtime/best_current/` 裡放著 27 類模型、
+文件卻描述 42 類系統的問題所要避免的。

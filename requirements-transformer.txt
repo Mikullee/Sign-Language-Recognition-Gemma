@@ -1,0 +1,8 @@
+# Knee42 Transformer inference path (CPU only, Python 3.12).
+# Versions verified end-to-end on Windows 11 against the shipped bundle.
+# For CPU-only torch: pip install torch==2.13.0 --index-url https://download.pytorch.org/whl/cpu
+torch==2.13.0
+mediapipe==0.10.35
+numpy==2.5.0
+opencv-python==5.0.0.93
+imageio-ffmpeg==0.6.0

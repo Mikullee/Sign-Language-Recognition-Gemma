@@ -8,11 +8,19 @@
 ## recognition
 
 放辨識端主成果：
-- 訓練
-- 評估
-- 即時推論
-- 共用 inference helpers
-- legacy baseline
+- `transformer/` — **現行辨識路徑**（42 類 Transformer，657 維輸入）
+- `realtime/` — 即時擷取、auto-trigger、共用幀層前處理、legacy BiGRU 即時推論
+- `training/` — 訓練
+- `evaluation/` — 評估
+- `inference/` — 共用 inference helpers
+
+## artifacts
+
+放即時辨識載入的模型 bundle：
+- `realtime/best_current/` — 現行 42 類 Transformer bundle
+- `legacy/daily30_27class/` — 舊版 27 類 bundle（保留可跑）
+
+細節見 [`artifacts/README.md`](../artifacts/README.md)。
 
 ## generation
 

@@ -21,6 +21,21 @@ SignLanguageRecognition.exe --source 1 --backend dshow
 ```powershell
 git clone https://github.com/Mikullee/Sign-Language-Recognition-Gemma.git
 cd Sign-Language-Recognition-Gemma
+conda create -n knee42 python=3.12 -y
+conda activate knee42
+python -m pip install -r requirements-transformer.txt
+```
+
+現行 42 類 Transformer 的 bundle 已附在 `artifacts/realtime/best_current/`，
+可先確認它通過完整性驗證：
+
+```powershell
+python -c "from recognition.transformer.recognizer import Knee42TransformerRecognizer as R; r = R('artifacts/realtime/best_current'); print(len(r.labels), '類載入成功')"
+```
+
+### Legacy 27 類即時推論
+
+```powershell
 conda env create -f environment.yml
 conda activate slr_runtime
 python -m recognition.realtime.realtime_infer_daily30_sentence
