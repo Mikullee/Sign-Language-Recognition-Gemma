@@ -38,6 +38,7 @@ from typing import Any
 import numpy as np
 
 from recognition.config import preview_paths
+from recognition.realtime.auto_trigger import load_auto_trigger_config
 from recognition.transformer.landmarks import HAND_LANDMARKS, POSE_LANDMARKS, TrackedFrame
 from recognition.transformer.recognizer import Knee42TransformerRecognizer
 from recognition.transformer.segmentation import analyze_frames, analyze_video
@@ -67,6 +68,7 @@ class ServiceConfig:
         )
         self.allow_url_fetch = bool(args.allow_url_fetch)
         self.recognizer = Knee42TransformerRecognizer(self.bundle_dir)
+        self.trigger_config = load_auto_trigger_config(args.trigger_config)
 
 
 # ── job queue: video analysis is slow and the tracker is not reentrant ────────
@@ -160,9 +162,23 @@ def enqueue(job_id: str, path: Path, cleanup: bool = True) -> None:
 
 
 def _points(raw: Any, expected: int) -> np.ndarray | None:
+    """Accept either a bare ``[[x, y, z], ...]`` list or MediaPipe's own wrapper.
+
+    The page forwards Tasks API output largely as it arrives, so pose comes
+    through as ``{"landmarks": [...]}`` while hands carry extra keys alongside
+    their landmarks. Treating only the bare form as valid silently turns every
+    real browser frame into a frame with no pose.
+    """
     if raw is None:
         return None
-    array = np.asarray(raw, dtype=np.float32)
+    if isinstance(raw, dict):
+        raw = raw.get("landmarks")
+        if raw is None:
+            return None
+    try:
+        array = np.asarray(raw, dtype=np.float32)
+    except (TypeError, ValueError):
+        return None
     if array.ndim == 2 and array.shape == (expected, 3):
         return array
     return None
@@ -206,6 +222,104 @@ def predict_payload(config: ServiceConfig, payload: dict) -> dict:
     if not frames:
         raise ValueError("no usable frames in the payload")
     return analyze_frames(frames, config.recognizer, topk=5)
+
+
+# ── /stream: auto-trigger over a live browser session ────────────────────────
+
+#: One auto-trigger state machine per browser tab. The machine is stateful --
+#: it calibrates a rest reference and holds a pre-roll buffer -- so it has to
+#: live across requests rather than being rebuilt per chunk.
+_STREAMS: dict[str, dict[str, Any]] = {}
+_STREAMS_LOCK = threading.Lock()
+STREAM_TTL_SECONDS = 300
+
+
+def _sweep_streams() -> None:
+    cutoff = time.time() - STREAM_TTL_SECONDS
+    with _STREAMS_LOCK:
+        for key in [k for k, v in _STREAMS.items() if v["seen"] < cutoff]:
+            _STREAMS.pop(key, None)
+
+
+def _stream_session(session_id: str, trigger_config, *, reset: bool) -> dict[str, Any]:
+    from recognition.realtime.knee42_controllers import AutoKnee42Controller
+
+    _sweep_streams()
+    with _STREAMS_LOCK:
+        entry = _STREAMS.get(session_id)
+        if entry is None or reset:
+            entry = {
+                "controller": AutoKnee42Controller(trigger_config, initial_mode="auto"),
+                "segments": 0,
+                "last_timestamp": None,
+                "seen": time.time(),
+            }
+            _STREAMS[session_id] = entry
+        entry["seen"] = time.time()
+        return entry
+
+
+def stream_payload(config: "ServiceConfig", payload: dict) -> dict:
+    """Feed one chunk of browser landmarks through this session's auto-trigger.
+
+    The browser cannot run this state machine: it is 700 lines of thresholds
+    calibrated on real sessions, and a JavaScript copy would drift from the one
+    the offline evaluation measures. So the page streams landmarks and the
+    decision stays here, on the same code path the CLI uses.
+    """
+    from recognition.transformer.landmarks import observation_from_frame
+
+    session_id = str(payload.get("session", ""))[:64] or "default"
+    entry = _stream_session(session_id, config.trigger_config, reset=bool(payload.get("reset")))
+    controller = entry["controller"]
+
+    results: list[dict] = []
+    for frame in frames_from_payload(payload.get("frames") or []):
+        timestamp = float(frame.timestamp)
+        previous = entry["last_timestamp"]
+        if previous is not None and timestamp <= previous:
+            timestamp = previous + 1e-3
+        interval = 1.0 / 30.0 if previous is None else max(timestamp - previous, 1e-3)
+        entry["last_timestamp"] = timestamp
+
+        observation = observation_from_frame(frame)
+        event = controller.add_held_observation(
+            timestamp,
+            observation.trigger_values,
+            (observation.recognition_values, observation.recognition_mask),
+            frame_interval_sec=interval,
+            sample_count=1,
+        )
+        if not event.infer:
+            continue
+
+        sequence = np.stack([values for values, _mask in event.features])
+        if len(sequence) < 4:
+            continue
+        entry["segments"] += 1
+        evidence = event.segment
+        results.append(
+            {
+                "index": entry["segments"],
+                "start": round(float(evidence.clip_start_sec), 2) if evidence else None,
+                "end": round(float(evidence.clip_end_sec), 2) if evidence else None,
+                "frames": int(len(sequence)),
+                "reason": evidence.reason if evidence else "unknown",
+                "top": [
+                    {"label": label, "text": text, "prob": round(float(prob), 6)}
+                    for label, text, prob in config.recognizer.predict(sequence, topk=5)
+                ],
+            }
+        )
+
+    return {
+        "ok": True,
+        "session": session_id,
+        "state": controller.state,
+        "calibrated": bool(controller.calibrated),
+        "buffered": int(controller.buffered_observations),
+        "results": results,
+    }
 
 
 # ── multipart: stream the upload to disk instead of buffering it ─────────────
@@ -343,6 +457,7 @@ class Handler(BaseHTTPRequestHandler):
                     "model": self.config.recognizer.bundle.model_card.get("model_id"),
                     "classes": len(self.config.recognizer.labels),
                     "url_fetch": self.config.allow_url_fetch and bool(shutil.which("yt-dlp")),
+                    "auto_trigger": True,
                     "max_upload_bytes": MAX_UPLOAD_BYTES,
                     "max_video_seconds": MAX_VIDEO_SECONDS,
                 }
@@ -376,6 +491,8 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if route == "/predict":
                 self._handle_predict()
+            elif route == "/stream":
+                self._handle_stream()
             elif route == "/analyze_upload":
                 self._handle_upload()
             elif route == "/analyze_url":
@@ -395,6 +512,13 @@ class Handler(BaseHTTPRequestHandler):
         result = predict_payload(self.config, payload)
         result["ok"] = True
         self._json(result)
+
+    def _handle_stream(self) -> None:
+        length = int(self.headers.get("Content-Length") or 0)
+        if length <= 0 or length > MAX_JSON_BYTES:
+            raise ValueError("payload is empty or too large")
+        payload = json.loads(self.rfile.read(length).decode("utf-8"))
+        self._json(stream_payload(self.config, payload))
 
     def _handle_upload(self) -> None:
         length = int(self.headers.get("Content-Length") or 0)
@@ -484,6 +608,12 @@ def main(argv: list[str] | None = None) -> int:
         type=Path,
         default=None,
         help="directory served at /vendor/mediapipe/ (MediaPipe web assets and .task files)",
+    )
+    parser.add_argument(
+        "--trigger-config",
+        type=Path,
+        default=Path("configs") / "auto_trigger_knee_v1.json",
+        help="auto-trigger thresholds used by the camera's automatic mode",
     )
     parser.add_argument("--certfile", type=Path, default=None)
     parser.add_argument("--keyfile", type=Path, default=None)

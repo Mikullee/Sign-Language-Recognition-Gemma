@@ -231,6 +231,54 @@ def frame_to_219(frame: TrackedFrame, *, mirrored: bool) -> np.ndarray | None:
     return normalize_frame(values, np.isfinite(values))
 
 
+def observation_from_frame(frame: TrackedFrame) -> "FrameObservation":
+    """Build the shared trigger/recognition views from already-extracted arrays.
+
+    ``knee42_preprocessing.observation_from_results`` does this from live
+    MediaPipe result objects. Landmarks that arrive as plain arrays -- from a
+    browser running MediaPipe itself, or from a replayed capture -- need the same
+    two views, derived identically: 225 trigger values with missing points zeroed,
+    and 219 shoulder-normalized recognition values that keep NaN where a landmark
+    was never seen.
+    """
+    from recognition.realtime.knee42_preprocessing import FrameObservation
+
+    pose = (
+        frame.pose.astype(np.float32)
+        if frame.pose is not None
+        else np.full((POSE_LANDMARKS, 3), np.nan, dtype=np.float32)
+    )
+    hands = {
+        side: frame.hands.get(side, np.full((HAND_LANDMARKS, 3), np.nan, dtype=np.float32))
+        for side in ("Left", "Right")
+    }
+
+    trigger = np.nan_to_num(
+        np.concatenate(
+            (pose.reshape(-1), hands["Left"].reshape(-1), hands["Right"].reshape(-1))
+        ),
+        nan=0.0,
+    ).astype(np.float32)
+
+    values = np.concatenate(
+        (
+            pose[np.asarray(POSE_KEEP, dtype=np.int64)].reshape(-1),
+            hands["Left"].reshape(-1),
+            hands["Right"].reshape(-1),
+        )
+    ).astype(np.float32)
+    mask = np.isfinite(values)
+
+    return FrameObservation(
+        trigger_values=trigger,
+        recognition_values=normalize_frame(values, mask),
+        recognition_mask=mask,
+        display_pose=pose,
+        display_left_hand=hands["Left"],
+        display_right_hand=hands["Right"],
+    )
+
+
 def frames_to_sequence(
     frames: Iterable[TrackedFrame],
     *,

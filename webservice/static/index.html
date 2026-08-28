@@ -168,6 +168,13 @@
       <div class="controls">
         <button id="rec-btn" class="big" disabled>啟動鏡頭</button>
         <button id="cam-btn">關閉鏡頭</button>
+        <span id="mode-switch" style="margin-left:auto;display:inline-flex;
+          border:1px solid var(--line);border-radius:8px;overflow:hidden;font-size:13px">
+          <button data-mode="manual" class="msw on" style="border:none;padding:7px 14px;
+            cursor:pointer;background:var(--accent);color:#08201c;font-weight:600">手動</button>
+          <button data-mode="auto" class="msw" style="border:none;padding:7px 14px;
+            cursor:pointer;background:none;color:var(--fg)">自動偵測</button>
+        </span>
       </div>
       <div id="status">
         <span>FPS <b id="s-fps">—</b></span>
@@ -279,6 +286,9 @@ const recBtn = $("rec-btn"), camBtn = $("cam-btn"), camMsg = $("cam-msg");
 
 let handLm = null, poseLm = null;
 let camOn = false, recording = false, busy = false;
+let camMode = "manual";                 // "manual" | "auto"
+let autoBuf = [], autoSending = false, autoT0 = 0, autoSession = "";
+let autoSeen = 0;                       // segments already rendered this session
 let recBuf = [], recStart = 0;
 let lastVideoTime = -1, fpsEMA = 0, lastTick = 0, lastMirror = "—";
 const MAX_SECONDS = 20;
@@ -388,6 +398,11 @@ function loop(now) {
   $("s-mirror").textContent = lastMirror;
   draw(hands, pose, shoulders);
 
+  if (camMode === "auto" && camOn) {
+    autoBuf.push({ pose, hands, timestamp: +((performance.now() - autoT0) / 1000).toFixed(4) });
+    if (autoBuf.length >= 6) flushAuto();
+  }
+
   if (recording) {
     recBuf.push({ pose, hands });
     const el = (performance.now() - recStart) / 1000;
@@ -431,6 +446,84 @@ function draw(hands, pose, shoulders) {
   ctx.restore();
 }
 
+function setMode(mode) {
+  if (mode === camMode) return;
+  if (recording) stopRec();
+  camMode = mode;
+  document.querySelectorAll("#mode-switch .msw").forEach(b => {
+    const on = b.dataset.mode === mode;
+    b.style.background = on ? "var(--accent)" : "none";
+    b.style.color = on ? "#08201c" : "var(--fg)";
+    b.style.fontWeight = on ? "600" : "400";
+  });
+  recBtn.style.display = mode === "auto" ? "none" : "";
+  autoBuf = []; autoSeen = 0;
+  autoSession = Math.random().toString(36).slice(2) + Date.now().toString(36);
+  autoT0 = performance.now();
+  if (mode === "auto") {
+    badge.textContent = camOn ? "自動偵測：校準中…" : "未啟動";
+    say(camMsg, "自動模式：雙手垂放身側站好，等校準完成後直接比劃，" +
+                "比完把手放回身側即可，不必按鍵。");
+    if (camOn) flushAuto(true);
+  } else {
+    badge.textContent = camOn ? "待機中" : "未啟動";
+    say(camMsg, "按住空白鍵錄影、放開結束；或直接點大按鈕開始／停止。");
+  }
+}
+
+async function flushAuto(reset = false) {
+  if (autoSending || !camOn || camMode !== "auto") return;
+  if (!reset && !autoBuf.length) return;
+  const chunk = autoBuf; autoBuf = [];
+  autoSending = true;
+  try {
+    const r = await fetch("stream", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ session: autoSession, reset, frames: chunk }),
+    });
+    const j = await r.json();
+    if (!j.ok) throw new Error(j.message || "stream failed");
+    renderAutoState(j);
+    (j.results || []).forEach(seg => renderAutoResult(seg));
+  } catch (e) {
+    say(camMsg, "自動模式連線失敗：" + e.message, "err");
+    setMode("manual");
+  } finally {
+    autoSending = false;
+  }
+}
+
+const AUTO_STATE_TEXT = {
+  IDLE_BLANK: "待命，可以開始比劃",
+  SIGNING_ACTIVE: "● 偵測到動作，比劃中",
+  END_CONFIRM: "確認結束中…",
+  COOLDOWN: "冷卻中",
+  FORCED_FINALIZE_COOLDOWN: "冷卻中",
+};
+
+function renderAutoState(j) {
+  if (!j.calibrated) { badge.textContent = "自動偵測：校準中，請站好不要動"; return; }
+  badge.textContent = AUTO_STATE_TEXT[j.state] || j.state;
+  badge.classList.toggle("rec", j.state === "SIGNING_ACTIVE");
+}
+
+function renderAutoResult(seg) {
+  autoSeen += 1;
+  const top = seg.top || [];
+  if (!top.length) return;
+  const best = top[0];
+  const low = best.prob < 0.5;
+  $("res-title").textContent = `第 ${seg.index} 句（${seg.start}s – ${seg.end}s，${seg.frames} 幀）`;
+  $("verdict").className = low ? "verdict low" : "verdict";
+  $("verdict").textContent = low ? `${best.text}（信心不足 ${(best.prob * 100).toFixed(0)}%）`
+                                 : `${best.text}　${(best.prob * 100).toFixed(0)}%`;
+  $("bars").innerHTML = top.map(t => `
+    <div class="row"><span class="lbl">${t.text}</span>
+    <span class="track"><span class="fill" style="width:${(t.prob * 100).toFixed(1)}%"></span></span>
+    <span class="pct">${(t.prob * 100).toFixed(1)}%</span></div>`).join("");
+  $("meta").textContent = `自動切段・${seg.reason}・${seg.frames} 幀`;
+}
+
 function startRec() {
   if (!camOn || recording || busy) return;
   recording = true; recBuf = []; recStart = performance.now();
@@ -451,13 +544,19 @@ function stopRec() {
 }
 
 recBtn.onclick = () => { if (!camOn) { startCam(); return; } recording ? stopRec() : startRec(); };
+document.querySelectorAll("#mode-switch .msw").forEach(b => {
+  b.addEventListener("click", () => setMode(b.dataset.mode));
+});
+setInterval(() => { if (camMode === "auto" && camOn) flushAuto(); }, 400);
 addEventListener("keydown", e => {
+  if (camMode === "auto") return;                       // 自動模式不吃空白鍵
   if (e.code !== "Space" || e.repeat || !$("pane-cam").classList.contains("on")) return;
   if (e.target.tagName === "BUTTON") e.target.blur();
   if (/INPUT|TEXTAREA/.test(e.target.tagName)) return;
   e.preventDefault(); startRec();
 });
 addEventListener("keyup", e => {
+  if (camMode === "auto") return;
   if (e.code !== "Space" || !$("pane-cam").classList.contains("on")) return;
   if (/INPUT|TEXTAREA/.test(e.target.tagName)) return;
   e.preventDefault(); stopRec();

@@ -42,8 +42,24 @@ python -m webservice.server --port 8642
 
 ### 攝影機
 
-按住空白鍵錄 1–3 秒,放開出結果。MediaPipe 在瀏覽器端執行,
-**只有骨架座標會 POST 到 `/predict`,畫面不會離開使用者的電腦**。
+右上角可切換兩種切段方式:
+
+| 模式 | 操作 |
+|---|---|
+| **手動**(預設) | 按住空白鍵錄 1–3 秒,放開出結果 |
+| **自動偵測** | 站好等校準完成,直接比劃,比完把手放回身側,不必按鍵 |
+
+MediaPipe 在瀏覽器端執行,**只有骨架座標會 POST 給伺服器,畫面不會離開使用者的電腦**。
+
+自動模式的**起訖判定在伺服器上**,走 `POST /stream`:頁面每 400 毫秒把累積的
+landmark 送上去,伺服器用 `recognition.realtime.auto_trigger` 那套已校準的狀態機決定
+邊界,段落結束時連同 top-5 一起回傳。
+
+**狀態機刻意不在瀏覽器重寫。** 它是七百行、在真實錄影上校準過的門檻,
+JavaScript 版本必然會跟離線評估所量測的那一份漂掉。頁面只負責送資料和顯示。
+
+伺服器為每個分頁維持一份狀態機(它要校準靜止基準、還要保留 pre-roll 緩衝,
+不能每次請求重建),閒置五分鐘回收。
 
 頁面送的是**原始、未翻轉**的 Tasks API 輸出,handedness 原樣保留——
 這就是訓練特徵快取的慣例。**不要在前端做任何水平翻轉或左右交換**,
@@ -66,7 +82,8 @@ python -m webservice.server --port 8642
 | GET | `/` | 測試頁 |
 | GET | `/health` | 模型 id、類別數、各項上限 |
 | GET | `/labels` | 42 類清單與中文對照 |
-| POST | `/predict` | `{frames:[{timestamp,pose,hands}]}` → 切段結果 + top-5 |
+| POST | `/predict` | `{frames:[{timestamp,pose,hands}]}` → 切段結果 + top-5(手動模式) |
+| POST | `/stream` | `{session,frames,reset?}` → `{state,calibrated,results}`(自動模式) |
 | POST | `/analyze_upload` | multipart,欄位名 `file` → `{job_id}` |
 | POST | `/analyze_url` | `{"url": "…"}` → `{job_id}` |
 | GET | `/job/<id>` | `{state, phase, done, total, result, error}` |
