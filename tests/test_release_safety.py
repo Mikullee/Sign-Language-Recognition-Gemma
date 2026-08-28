@@ -21,6 +21,7 @@ class ReleaseSafetyTests(unittest.TestCase):
             ROOT / "environment.yml",
             ROOT / "artifacts" / "realtime" / "best_current",
             ROOT / "artifacts" / "legacy" / "daily30_27class",
+            ROOT / "webservice",
         ]
         texts: list[tuple[Path, str]] = []
         for scan_root in scan_roots:
@@ -127,6 +128,37 @@ class ReleaseSafetyTests(unittest.TestCase):
         self.assertIn("resources/artifacts/realtime/best_current", normalized)
         self.assertIn("collect_all", spec_text)
         self.assertIn("SignLanguageRecognition", spec_text)
+
+    def test_packaging_ships_every_bundle_the_frozen_app_can_resolve(self):
+        """A packaged app must contain the bundle its entry point actually loads.
+
+        Asserting only that the spec mentions best_current let a build ship the
+        Transformer bundle while the entry point looked for the legacy one.
+        """
+        from recognition.config import preview_paths
+
+        normalized = (
+            (ROOT / "packaging" / "windows" / "SignLanguageRecognition.spec")
+            .read_text(encoding="utf-8")
+            .replace("\\", "/")
+        )
+        paths = preview_paths()
+        for attribute in ("runtime_bundle_dir", "legacy_bundle_dir"):
+            relative = getattr(paths, attribute).relative_to(paths.repo_root).as_posix()
+            self.assertIn(
+                f"resources/{relative}",
+                normalized,
+                f"{attribute} ({relative}) is not packaged into the Windows build",
+            )
+
+    def test_the_windows_entry_point_bundle_exists_in_the_tree(self):
+        """The legacy entry point's default bundle must be present, not just declared."""
+        from recognition.inference.daily30_sentence_realtime_utils import DEFAULT_CACHE_DIR
+
+        self.assertTrue(
+            (DEFAULT_CACHE_DIR / "best_model.pt").is_file(),
+            f"windows_entry.py resolves {DEFAULT_CACHE_DIR}, which has no model",
+        )
 
 
 if __name__ == "__main__":

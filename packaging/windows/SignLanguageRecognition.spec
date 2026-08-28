@@ -9,11 +9,18 @@ mediapipe_datas, mediapipe_binaries, mediapipe_hiddenimports = collect_all(
 )
 torch_binaries = collect_dynamic_libs("torch")
 
+# Both bundles ship. windows_entry.py still launches the legacy 27-class app,
+# which resolves PreviewPaths.legacy_bundle_dir, so omitting the legacy bundle
+# produces an executable that cannot find its own model.
 datas = mediapipe_datas + [
     (str(ROOT / "models"), "resources/models"),
     (
         str(ROOT / "artifacts" / "realtime" / "best_current"),
         "resources/artifacts/realtime/best_current",
+    ),
+    (
+        str(ROOT / "artifacts" / "legacy" / "daily30_27class"),
+        "resources/artifacts/legacy/daily30_27class",
     ),
 ]
 

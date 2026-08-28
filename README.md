@@ -120,9 +120,15 @@ repository 同時保留兩個模型。**現行路徑是 Transformer**，BiGRU �
 這是跨全部實驗一致的現象，指向該簽者的動作風格與其餘三位差異較大，
 是後續補資料時應優先處理的方向。
 
-所有數字由 [`scripts/aggregate_knee42_loso_runs.py`](scripts/aggregate_knee42_loso_runs.py)
-從原始訓練 log 重算，完整結果含各種子原始值存於
-[`docs/evaluation/knee42_loso_metrics.json`](docs/evaluation/knee42_loso_metrics.json)，**可自行驗證**。
+原始訓練 log 就在 [`docs/evaluation/runs/`](docs/evaluation/runs/)（72 行，每行一次訓練），
+上表由 [`scripts/aggregate_knee42_loso_runs.py`](scripts/aggregate_knee42_loso_runs.py) 從中重算：
+
+```bash
+python scripts/aggregate_knee42_loso_runs.py     --runs docs/evaluation/runs --out /tmp/check.json
+```
+
+輸出應與 [`docs/evaluation/knee42_loso_metrics.json`](docs/evaluation/knee42_loso_metrics.json) 相同。
+**這一步不需要特徵快取,任何人 clone 下來都能重算。**
 
 #### 與 legacy BiGRU 的同條件比較
 

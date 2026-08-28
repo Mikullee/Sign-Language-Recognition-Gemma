@@ -144,5 +144,43 @@ class RecognizerTests(unittest.TestCase):
         self.assertEqual(self.recognizer.predict_batch([]), [])
 
 
+class PublishedMetricsTests(unittest.TestCase):
+    """The README table must stay derivable from the logs committed beside it."""
+
+    def test_the_committed_metrics_match_a_fresh_aggregation_of_the_raw_logs(self):
+        import subprocess
+        import sys
+
+        expected = json.loads(
+            (ROOT / "docs" / "evaluation" / "knee42_loso_metrics.json").read_text(encoding="utf-8")
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            out = Path(directory) / "recomputed.json"
+            subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "scripts" / "aggregate_knee42_loso_runs.py"),
+                    "--runs", str(ROOT / "docs" / "evaluation" / "runs"),
+                    "--out", str(out),
+                ],
+                check=True,
+                capture_output=True,
+                cwd=ROOT,
+            )
+            recomputed = json.loads(out.read_text(encoding="utf-8"))
+        self.assertEqual(recomputed, expected)
+
+    def test_every_arm_quoted_in_the_readme_is_present_with_its_seeds(self):
+        metrics = json.loads(
+            (ROOT / "docs" / "evaluation" / "knee42_loso_metrics.json").read_text(encoding="utf-8")
+        )
+        for arm in ("transslr", "pretrained_ft", "proto", "mirror_ab", "mcc_v2"):
+            self.assertIn(arm, metrics["arms"])
+            summary = metrics["arms"][arm]
+            self.assertGreaterEqual(summary["runs"], 12)
+            for group in summary["per_test_signer"].values():
+                self.assertEqual(group["seeds"], 3)
+
+
 if __name__ == "__main__":
     unittest.main()
