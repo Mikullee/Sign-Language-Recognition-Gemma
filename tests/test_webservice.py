@@ -176,5 +176,88 @@ class StreamSessionTests(unittest.TestCase):
         self.assertNotIn("tab-old", _STREAMS)
 
 
+class PageContractTests(unittest.TestCase):
+    """The response must carry every field the page reads.
+
+    Regression: /predict returned the analysis shape but not `top5`, so the page
+    threw `Cannot read properties of undefined (reading '0')` -- which its own
+    catch block reported as "cannot reach the server", sending the diagnosis in
+    entirely the wrong direction. The field list is parsed from the page rather
+    than hard-coded, so adding a `d.something` in the UI fails here until the
+    server provides it.
+    """
+
+    PAGE = ROOT / "webservice" / "static" / "index.html"
+
+    def _fields_read_by(self, function_name: str) -> set[str]:
+        import re
+
+        source = self.PAGE.read_text(encoding="utf-8")
+        start = source.index(f"function {function_name}(")
+        body = source[start : source.index("\n}", start)]
+        return set(re.findall(r"\bd\.([a-z_0-9]+)", body))
+
+    def test_predict_returns_every_field_the_camera_view_reads(self):
+        import json
+        from types import SimpleNamespace
+
+        from recognition.transformer.recognizer import Knee42TransformerRecognizer
+        from webservice.server import predict_payload
+
+        wanted = self._fields_read_by("renderCam")
+        self.assertIn("top5", wanted, "the page stopped reading top5; update this test")
+
+        config = SimpleNamespace(
+            recognizer=Knee42TransformerRecognizer(
+                ROOT / "artifacts" / "realtime" / "best_current"
+            )
+        )
+        frame = {
+            "pose": {"landmarks": [[0.5, 0.4, 0.0]] * POSE_LANDMARKS},
+            "hands": [
+                {"handedness": "Right", "landmarks": [[0.4, 0.6, 0.0]] * HAND_LANDMARKS}
+            ],
+        }
+        for index, entry in enumerate([dict(frame, timestamp=i / 30) for i in range(30)]):
+            pass
+        payload = {"frames": [dict(frame, timestamp=i / 30) for i in range(30)]}
+        response = predict_payload(config, payload)
+        response["ok"] = True  # the handler adds this before sending
+
+        # message is only read in the !d.ok branch, so a success response
+        # legitimately omits it.
+        wanted -= {"message"}
+        missing = sorted(field for field in wanted if field not in response)
+        self.assertEqual(missing, [], f"page reads fields /predict never sends: {missing}")
+        json.dumps(response, ensure_ascii=False)  # must survive serialization
+
+    def test_top5_is_ranked_and_carries_what_the_bars_need(self):
+        from types import SimpleNamespace
+
+        from recognition.transformer.recognizer import Knee42TransformerRecognizer
+        from webservice.server import predict_payload
+
+        config = SimpleNamespace(
+            recognizer=Knee42TransformerRecognizer(
+                ROOT / "artifacts" / "realtime" / "best_current"
+            )
+        )
+        frame = {
+            "pose": {"landmarks": [[0.5, 0.4, 0.0]] * POSE_LANDMARKS},
+            "hands": [
+                {"handedness": "Right", "landmarks": [[0.4, 0.6, 0.0]] * HAND_LANDMARKS}
+            ],
+        }
+        top5 = predict_payload(
+            config, {"frames": [dict(frame, timestamp=i / 30) for i in range(30)]}
+        )["top5"]
+
+        self.assertEqual(len(top5), 5)
+        for item in top5:
+            self.assertEqual(set(item), {"label", "text", "prob"})
+        probabilities = [item["prob"] for item in top5]
+        self.assertEqual(probabilities, sorted(probabilities, reverse=True))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -215,13 +215,35 @@ def frames_from_payload(raw_frames: list[dict]) -> list[TrackedFrame]:
 
 
 def predict_payload(config: ServiceConfig, payload: dict) -> dict:
+    """Recognize one manually-recorded clip from the page's camera mode.
+
+    The response carries both shapes on purpose. ``segments``/``whole`` is the
+    analysis result the rest of the codebase speaks; ``top5`` and the timing
+    fields are what static/index.html reads, and omitting them makes the page
+    throw a TypeError that its own error handler misreports as a connection
+    failure. tests/test_webservice.py parses the page for the field names so the
+    two cannot drift apart again.
+    """
     raw_frames = payload.get("frames")
     if not isinstance(raw_frames, list) or not raw_frames:
         raise ValueError("payload needs a non-empty 'frames' list")
+
+    started = time.perf_counter()
     frames = frames_from_payload(raw_frames)
     if not frames:
         raise ValueError("no usable frames in the payload")
-    return analyze_frames(frames, config.recognizer, topk=5)
+    converted = time.perf_counter()
+
+    result = analyze_frames(frames, config.recognizer, topk=5)
+    result["convert_ms"] = round((converted - started) * 1000, 1)
+    result["infer_ms"] = round((time.perf_counter() - converted) * 1000, 1)
+    # This path always feeds the training convention rather than detecting it;
+    # see recognition/transformer/landmarks.py on why the left-shoulder sign
+    # cannot serve as a mirror detector.
+    result["mirror_mode"] = "fixed"
+    whole = result.get("whole") or {}
+    result["top5"] = whole.get("top", [])
+    return result
 
 
 # ── /stream: auto-trigger over a live browser session ────────────────────────
