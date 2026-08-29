@@ -231,6 +231,32 @@ class PageContractTests(unittest.TestCase):
         self.assertEqual(missing, [], f"page reads fields /predict never sends: {missing}")
         json.dumps(response, ensure_ascii=False)  # must survive serialization
 
+    def test_health_returns_every_field_the_banner_reads(self):
+        """Same failure mode as top5: a missing field renders as "undefined MB"."""
+        import re
+
+        source = self.PAGE.read_text(encoding="utf-8")
+        start = source.index('fetch("health")')
+        block = source[start : source.index("\n\n", start)]
+        wanted = set(re.findall(r"\bh\.([a-z_0-9]+)", block))
+        self.assertIn("max_upload_mb", wanted, "the banner stopped reading max_upload_mb")
+
+        served = self._health_fields()
+        missing = sorted(field for field in wanted if field not in served)
+        self.assertEqual(missing, [], f"page reads /health fields never sent: {missing}")
+
+    def _health_fields(self) -> set[str]:
+        """The keys the handler puts in its /health body, read from the source.
+
+        Parsed rather than requested, so the test needs no running server.
+        """
+        import re
+
+        source = (ROOT / "webservice" / "server.py").read_text(encoding="utf-8")
+        start = source.index('if route == "/health":')
+        block = source[start : source.index("return", start)]
+        return set(re.findall(r'"([a-z_0-9]+)":', block))
+
     def test_top5_is_ranked_and_carries_what_the_bars_need(self):
         from types import SimpleNamespace
 

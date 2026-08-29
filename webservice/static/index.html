@@ -324,6 +324,9 @@ async function startCam() {
       video: { width: { ideal: 960 }, height: { ideal: 540 }, facingMode: "user" }, audio: false });
     await video.play();
     canvas.width = video.videoWidth || 960; canvas.height = video.videoHeight || 540;
+    // 讓外框比例跟著攝影機實際輸出走。寫死 16/9 會把非 16:9 的來源
+    // (例如 iVCam 手機鏡頭) 拉扁,骨架疊圖也會跟著偏移。
+    $("stage").style.aspectRatio = canvas.width + " / " + canvas.height;
     camOn = true;
     overlay.classList.add("hide");
     badge.textContent = "待機中";

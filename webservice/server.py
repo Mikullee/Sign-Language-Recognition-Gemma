@@ -480,7 +480,11 @@ class Handler(BaseHTTPRequestHandler):
                     "classes": len(self.config.recognizer.labels),
                     "url_fetch": self.config.allow_url_fetch and bool(shutil.which("yt-dlp")),
                     "auto_trigger": True,
+                    # index.html reads max_upload_mb and ytdlp; sending only the
+                    # canonical names renders "undefined MB" in the banner.
                     "max_upload_bytes": MAX_UPLOAD_BYTES,
+                    "max_upload_mb": MAX_UPLOAD_BYTES // (1024 * 1024),
+                    "ytdlp": self.config.allow_url_fetch and bool(shutil.which("yt-dlp")),
                     "max_video_seconds": MAX_VIDEO_SECONDS,
                 }
             )
