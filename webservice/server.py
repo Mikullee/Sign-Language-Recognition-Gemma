@@ -296,6 +296,8 @@ def stream_payload(config: "ServiceConfig", payload: dict) -> dict:
     controller = entry["controller"]
 
     results: list[dict] = []
+    last_analysis = None
+    last_hands = 0
     for frame in frames_from_payload(payload.get("frames") or []):
         timestamp = float(frame.timestamp)
         previous = entry["last_timestamp"]
@@ -305,12 +307,16 @@ def stream_payload(config: "ServiceConfig", payload: dict) -> dict:
         entry["last_timestamp"] = timestamp
 
         observation = observation_from_frame(frame)
+        last_hands = len(frame.hands)
         event = controller.add_held_observation(
             timestamp,
             observation.trigger_values,
             (observation.recognition_values, observation.recognition_mask),
             frame_interval_sec=interval,
             sample_count=1,
+        )
+        last_analysis = controller._analysis_fn(
+            controller._previous_trigger, observation.trigger_values, controller.config
         )
         if not event.infer:
             continue
@@ -320,6 +326,21 @@ def stream_payload(config: "ServiceConfig", payload: dict) -> dict:
             continue
         entry["segments"] += 1
         evidence = event.segment
+        top = config.recognizer.predict(sequence, topk=5)
+        # Auto-mode results only ever reached the browser, which made the one
+        # thing worth studying -- why a segment closed, and how long it was --
+        # impossible to review afterwards. One line per segment, same shape as
+        # the CLI prints, so both sessions can be analysed the same way.
+        print(
+            f"[stream {session_id[:8]}] #{entry['segments']:<3} "
+            f"{evidence.clip_start_sec:7.2f} - {evidence.clip_end_sec:7.2f} "
+            f"({evidence.clip_end_sec - evidence.clip_start_sec:5.2f}s, "
+            f"{len(sequence):3d} frames, {evidence.reason})  "
+            + "  ".join(f"{text} {prob:.2f}" for _label, text, prob in top[:3])
+            if evidence
+            else f"[stream {session_id[:8]}] #{entry['segments']} (no evidence)",
+            flush=True,
+        )
         results.append(
             {
                 "index": entry["segments"],
@@ -329,14 +350,27 @@ def stream_payload(config: "ServiceConfig", payload: dict) -> dict:
                 "reason": evidence.reason if evidence else "unknown",
                 "top": [
                     {"label": label, "text": text, "prob": round(float(prob), 6)}
-                    for label, text, prob in config.recognizer.predict(sequence, topk=5)
+                    for label, text, prob in top
                 ],
             }
         )
 
+    # Why a session never leaves SIGNING_ACTIVE is invisible without this.
+    # Rest is confirmed only when the distance to the calibrated reference falls
+    # under reference_rest_distance_threshold, and that reference is seeded once
+    # and never refreshed -- so a posture that drifts after the first sign can
+    # put the distance permanently out of reach. Reporting it turns that from a
+    # guess into something the page can display while signing.
+    rest_distance = None
+    if last_analysis is not None:
+        rest_distance = controller.engine._reference_distance(last_analysis)
+
     return {
         "ok": True,
         "session": session_id,
+        "rest_distance": None if rest_distance is None else round(rest_distance, 4),
+        "rest_threshold": config.trigger_config.reference_rest_distance_threshold,
+        "hands_detected": last_hands,
         "state": controller.state,
         "calibrated": bool(controller.calibrated),
         "buffered": int(controller.buffered_observations),

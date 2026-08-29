@@ -505,7 +505,22 @@ const AUTO_STATE_TEXT = {
 };
 
 function renderAutoState(j) {
-  if (!j.calibrated) { badge.textContent = "自動偵測：校準中，請站好不要動"; return; }
+  // 靜止距離是自動模式唯一真正重要的診斷數字：段落要收尾，
+  // 它必須掉到門檻以下。看得到它才知道是「沒停」還是「停了但認不出來」。
+  const d = j.rest_distance, th = j.rest_threshold;
+  let rest = "";
+  if (d !== null && d !== undefined) {
+    const ok = d <= th;
+    const colour = ok ? "var(--ok)" : "var(--err)";
+    rest = ' · 靜止距離 <b style="color:' + colour + '">' + d.toFixed(3) + "</b> / " + th
+         + (ok ? " ✔ 已回到基準" : " ✘ 尚未回到基準");
+  } else {
+    rest = ' · 靜止距離 <b style="color:var(--err)">算不出來</b>（需要雙手都被偵測到）';
+  }
+  const hands = j.hands_detected === 2 ? "雙手" : j.hands_detected === 1 ? "僅單手" : "無";
+  $("s-mirror").innerHTML = "偵測 " + hands + rest;
+
+  if (!j.calibrated) { badge.textContent = "自動偵測：校準中，請保持不動"; return; }
   badge.textContent = AUTO_STATE_TEXT[j.state] || j.state;
   badge.classList.toggle("rec", j.state === "SIGNING_ACTIVE");
 }
