@@ -308,5 +308,16 @@ class PageContractTests(unittest.TestCase):
         self.assertEqual(probabilities, sorted(probabilities, reverse=True))
 
 
+class LocalHttpSafetyTests(unittest.TestCase):
+    def test_plain_http_accepts_only_loopback_hosts(self):
+        from webservice.server import validate_plain_http_host
+
+        for host in ("127.0.0.1", "localhost", "::1"):
+            validate_plain_http_host(host)
+        for host in ("0.0.0.0", "192.168.1.10", "example.com"):
+            with self.assertRaisesRegex(SystemExit, "loopback"):
+                validate_plain_http_host(host)
+
+
 if __name__ == "__main__":
     unittest.main()

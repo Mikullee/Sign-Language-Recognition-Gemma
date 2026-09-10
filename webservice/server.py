@@ -12,9 +12,10 @@ Standard library only, apart from the recognition package itself.  Run with:
 
     python -m webservice.server --port 8642
 
-TLS is required: browsers only expose ``getUserMedia`` on a secure origin.  A
-self-signed certificate is generated on first start if ``openssl`` is available,
-otherwise pass ``--certfile``/``--keyfile``.
+TLS is required for network access because browsers only expose ``getUserMedia``
+on a secure origin.  Local loopback testing may use ``--http`` because browsers
+treat localhost as a secure context.  Otherwise a self-signed certificate is
+generated on first start if ``openssl`` is available, or pass a certificate pair.
 
 There is no authentication.  Anyone who can reach the port can use it, so bind
 it to a trusted network or put it behind a reverse proxy that authenticates.
@@ -46,6 +47,7 @@ from recognition.transformer.segmentation import analyze_frames, analyze_video
 
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
+DEFAULT_TRIGGER_CONFIG = Path("configs") / "auto_trigger_knee_web_live.json"
 
 MAX_JSON_BYTES = 64 * 1024 * 1024
 MAX_UPLOAD_BYTES = 200 * 1024 * 1024
@@ -659,6 +661,12 @@ def ensure_certificate(cert_dir: Path) -> tuple[Path, Path]:
     return certfile, keyfile
 
 
+def validate_plain_http_host(host: str) -> None:
+    """Refuse unencrypted HTTP unless it is confined to this computer."""
+    if host.strip().lower() not in {"127.0.0.1", "localhost", "::1"}:
+        raise SystemExit("--http is allowed only with a loopback host")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--host", default="0.0.0.0")
@@ -675,11 +683,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--trigger-config",
         type=Path,
-        default=Path("configs") / "auto_trigger_knee_v1.json",
+        default=DEFAULT_TRIGGER_CONFIG,
         help="auto-trigger thresholds used by the camera's automatic mode",
     )
     parser.add_argument("--certfile", type=Path, default=None)
     parser.add_argument("--keyfile", type=Path, default=None)
+    parser.add_argument(
+        "--http",
+        action="store_true",
+        help="serve plain HTTP for local loopback testing only",
+    )
     parser.add_argument(
         "--allow-url-fetch",
         action="store_true",
@@ -690,7 +703,11 @@ def main(argv: list[str] | None = None) -> int:
     config = ServiceConfig(args)
     Handler.config = config
 
-    if args.certfile and args.keyfile:
+    certfile: Path | None = None
+    keyfile: Path | None = None
+    if args.http:
+        validate_plain_http_host(args.host)
+    elif args.certfile and args.keyfile:
         certfile, keyfile = args.certfile, args.keyfile
     else:
         certfile, keyfile = ensure_certificate(HERE / "certs")
@@ -698,15 +715,19 @@ def main(argv: list[str] | None = None) -> int:
     threading.Thread(target=worker_loop, args=(config,), daemon=True).start()
 
     httpd = ThreadingHTTPServer((args.host, args.port), Handler)
-    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    context.load_cert_chain(certfile=str(certfile), keyfile=str(keyfile))
-    httpd.socket = context.wrap_socket(httpd.socket, server_side=True)
+    if not args.http:
+        assert certfile is not None and keyfile is not None
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.load_cert_chain(certfile=str(certfile), keyfile=str(keyfile))
+        httpd.socket = context.wrap_socket(httpd.socket, server_side=True)
 
     card = config.recognizer.bundle.model_card
     print(f"[init] model  {card.get('model_id')} ({len(config.recognizer.labels)} classes)")
     print(f"[init] bundle {config.bundle_dir}")
     print(f"[init] vendor {config.vendor_dir}")
-    print(f"[init] listening on https://{args.host}:{args.port}  (TLS: {certfile.name})")
+    scheme = "http" if args.http else "https"
+    tls_note = "local loopback only" if args.http else f"TLS: {certfile.name}"
+    print(f"[init] listening on {scheme}://{args.host}:{args.port}  ({tls_note})")
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

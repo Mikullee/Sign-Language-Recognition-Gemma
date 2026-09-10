@@ -53,6 +53,14 @@ def observed(
 
 
 class WebAutoTriggerTests(unittest.TestCase):
+    def test_web_service_defaults_to_live_trigger_config(self):
+        from webservice.server import DEFAULT_TRIGGER_CONFIG
+
+        self.assertEqual(
+            DEFAULT_TRIGGER_CONFIG.as_posix(),
+            "configs/auto_trigger_knee_web_live.json",
+        )
+
     def test_web_live_config_is_fail_safe_and_rearms(self):
         config = load_web_trigger_config(
             ROOT / "configs" / "auto_trigger_knee_web_live.json"
