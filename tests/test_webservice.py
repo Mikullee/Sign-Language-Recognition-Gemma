@@ -143,6 +143,24 @@ class BrowserLandmarkShapeTests(unittest.TestCase):
 class StreamSessionTests(unittest.TestCase):
     """Auto mode keeps one calibrated state machine per browser tab."""
 
+    def test_stream_response_exposes_rearm_diagnostics(self):
+        from types import SimpleNamespace
+
+        from recognition.transformer.live_trigger import WebAutoTriggerConfig
+        from webservice.server import stream_payload
+
+        response = stream_payload(
+            SimpleNamespace(
+                trigger_config=WebAutoTriggerConfig(reference_rest_enabled=True),
+                recognizer=None,
+            ),
+            {"session": "diagnostic-tab", "reset": True, "frames": []},
+        )
+
+        self.assertEqual(response["rest_signature_status"], "uncalibrated")
+        self.assertEqual(response["reference_revision"], 0)
+        self.assertFalse(response["rearm_ready"])
+
     def test_each_session_gets_its_own_state_machine(self):
         from recognition.realtime.auto_trigger import load_auto_trigger_config
         from webservice.server import _STREAMS, _stream_session
@@ -188,6 +206,11 @@ class PageContractTests(unittest.TestCase):
     """
 
     PAGE = ROOT / "webservice" / "static" / "index.html"
+
+    def test_auto_view_explains_rearming_and_uses_server_rest_status(self):
+        source = self.PAGE.read_text(encoding="utf-8")
+        self.assertIn('REARMING: "請回到休息姿勢，重新校準中…"', source)
+        self.assertIn("j.rest_signature_status", source)
 
     def _fields_read_by(self, function_name: str) -> set[str]:
         import re

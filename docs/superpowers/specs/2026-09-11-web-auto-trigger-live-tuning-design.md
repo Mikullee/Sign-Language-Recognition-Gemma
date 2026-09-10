@@ -45,8 +45,9 @@
 
 - `webservice/static/index.html`：擷取瀏覽器 MediaPipe landmark、顯示診斷值與使用者可見狀態。
 - `webservice/server.py`：接收時間戳與 landmarks，回傳狀態、切段結果及 Top-3。
-- `recognition/realtime/auto_trigger.py`：唯一的自動切段狀態機與 rest reference 管理者。
-- `configs/auto_trigger_knee_v1.json`：基準設定；每個候選版本另存，禁止校準程序默默覆寫正式設定。
+- `recognition/realtime/auto_trigger.py`：舊 V13 封存狀態機；其 SHA-256 受 provenance 測試鎖定，不得為目前 Web 調校而修改。
+- `recognition/transformer/live_trigger.py`：目前 Transformer/Web 專用的自適應重新待命、Pose 手腕備援與診斷層；重用封存狀態機但不改寫它。
+- `configs/auto_trigger_knee_v1.json`：舊基準設定；`configs/auto_trigger_knee_web_live.json` 為可稽核的 Web 候選設定，禁止校準程序默默覆寫任一檔案。
 - 測試與 session log：保存每次迭代的設定摘要、症狀與量測，不保存或公開人物原始影像，除非使用者另行明確同意。
 
 資料流為：瀏覽器影像 → 本機 MediaPipe landmarks → `/stream` → trigger state machine → 完整片段 → Transformer v12 → Top-3 → Web UI／session evidence。

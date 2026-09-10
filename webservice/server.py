@@ -38,8 +38,8 @@ from typing import Any
 import numpy as np
 
 from recognition.config import preview_paths
-from recognition.realtime.auto_trigger import load_auto_trigger_config
 from recognition.transformer.landmarks import HAND_LANDMARKS, POSE_LANDMARKS, TrackedFrame
+from recognition.transformer.live_trigger import load_web_trigger_config
 from recognition.transformer.recognizer import Knee42TransformerRecognizer
 from recognition.transformer.segmentation import analyze_frames, analyze_video
 
@@ -68,7 +68,7 @@ class ServiceConfig:
         )
         self.allow_url_fetch = bool(args.allow_url_fetch)
         self.recognizer = Knee42TransformerRecognizer(self.bundle_dir)
-        self.trigger_config = load_auto_trigger_config(args.trigger_config)
+        self.trigger_config = load_web_trigger_config(args.trigger_config)
 
 
 # ── job queue: video analysis is slow and the tracker is not reentrant ────────
@@ -264,14 +264,14 @@ def _sweep_streams() -> None:
 
 
 def _stream_session(session_id: str, trigger_config, *, reset: bool) -> dict[str, Any]:
-    from recognition.realtime.knee42_controllers import AutoKnee42Controller
+    from recognition.transformer.live_trigger import WebAutoKnee42Controller
 
     _sweep_streams()
     with _STREAMS_LOCK:
         entry = _STREAMS.get(session_id)
         if entry is None or reset:
             entry = {
-                "controller": AutoKnee42Controller(trigger_config, initial_mode="auto"),
+                "controller": WebAutoKnee42Controller(trigger_config, initial_mode="auto"),
                 "segments": 0,
                 "last_timestamp": None,
                 "seen": time.time(),
@@ -373,6 +373,9 @@ def stream_payload(config: "ServiceConfig", payload: dict) -> dict:
         "hands_detected": last_hands,
         "state": controller.state,
         "calibrated": bool(controller.calibrated),
+        "rest_signature_status": controller.engine.rest_signature_status(last_analysis),
+        "reference_revision": int(controller.engine.reference_revision),
+        "rearm_ready": bool(controller.engine._rearm_ready),
         "buffered": int(controller.buffered_observations),
         "results": results,
     }

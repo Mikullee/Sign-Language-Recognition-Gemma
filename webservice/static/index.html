@@ -465,8 +465,8 @@ function setMode(mode) {
   autoT0 = performance.now();
   if (mode === "auto") {
     badge.textContent = camOn ? "自動偵測：校準中…" : "未啟動";
-    say(camMsg, "自動模式：雙手垂放身側站好，等校準完成後直接比劃，" +
-                "比完把手放回身側即可，不必按鍵。");
+    say(camMsg, "自動模式：先擺好固定的休息姿勢並保持不動，等校準完成後直接比劃；" +
+                "每句結束後回到同一姿勢即可，不必按鍵。");
     if (camOn) flushAuto(true);
   } else {
     badge.textContent = camOn ? "待機中" : "未啟動";
@@ -502,6 +502,15 @@ const AUTO_STATE_TEXT = {
   END_CONFIRM: "確認結束中…",
   COOLDOWN: "冷卻中",
   FORCED_FINALIZE_COOLDOWN: "冷卻中",
+  REARMING: "請回到休息姿勢，重新校準中…",
+};
+
+const REST_STATUS_TEXT = {
+  uncalibrated: "尚未完成初始校準",
+  missing_pose: "姿態關鍵點不足",
+  missing_wrists: "手腕關鍵點不足",
+  pose_wrist_fallback: "使用 Pose 手腕備援",
+  palm_and_wrist: "雙手與手腕特徵可用",
 };
 
 function renderAutoState(j) {
@@ -515,10 +524,13 @@ function renderAutoState(j) {
     rest = ' · 靜止距離 <b style="color:' + colour + '">' + d.toFixed(3) + "</b> / " + th
          + (ok ? " ✔ 已回到基準" : " ✘ 尚未回到基準");
   } else {
-    rest = ' · 靜止距離 <b style="color:var(--err)">算不出來</b>（需要雙手都被偵測到）';
+    const statusText = REST_STATUS_TEXT[j.rest_signature_status]
+                    || j.rest_signature_status || "未知原因";
+    rest = ' · 靜止距離 <b style="color:var(--err)">算不出來</b>（' + statusText + '）';
   }
   const hands = j.hands_detected === 2 ? "雙手" : j.hands_detected === 1 ? "僅單手" : "無";
-  $("s-mirror").innerHTML = "偵測 " + hands + rest;
+  const revision = Number.isFinite(j.reference_revision) ? " · 基準版本 " + j.reference_revision : "";
+  $("s-mirror").innerHTML = "偵測 " + hands + rest + revision;
 
   if (!j.calibrated) { badge.textContent = "自動偵測：校準中，請保持不動"; return; }
   badge.textContent = AUTO_STATE_TEXT[j.state] || j.state;
