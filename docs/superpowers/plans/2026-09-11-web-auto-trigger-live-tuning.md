@@ -127,7 +127,7 @@ adaptive_rearm_hold_sec: float = 0.50
 adaptive_rearm_requires_knee_rest: bool = False
 ```
 
-Add a stable sample predicate that requires a usable full and wrist signature, valid torso/wrists, two explicit hands, and motion no greater than `reference_seed_motion_threshold`. While `REARMING`, accumulate only consecutive safe samples. Once the configured hold is reached, replace both references with the median of the collected signatures and transition to `IDLE_BLANK`. Any unsafe sample clears only the candidate window, not the existing reference. The core transition is:
+Add a stable sample predicate that requires a usable pose-wrist signature, valid torso/wrists, and motion no greater than `reference_seed_motion_threshold`. A two-palm `rest_signature` is preferred and collected whenever present, but is not required: this prevents one missing MediaPipe hand from deadlocking calibration. While `REARMING`, accumulate only consecutive safe samples. Once the configured hold is reached, refresh the wrist reference and refresh the palm reference when palm samples exist, then transition to `IDLE_BLANK`. Any unsafe sample clears only the candidate window, not the existing reference. Treat the engine as calibrated when either reference exists. The core transition is:
 
 ```python
 def _complete_rearm(self) -> None:
@@ -139,6 +139,8 @@ def _complete_rearm(self) -> None:
     self._active_start_sec = None
     self._clear_rearm_window()
 ```
+
+Add a failing test that starts with `body_frame(hands_visible=False, hands_on_knees=True)`, confirms `wrist_rest_signature` is available, completes initial calibration, and permits a later segment. This is the regression for the measured single-hand/missing-hand field failure.
 
 At the end of cooldown use:
 
