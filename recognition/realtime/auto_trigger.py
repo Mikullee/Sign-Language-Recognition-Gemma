@@ -12,7 +12,6 @@ SEGMENT_STATE_IDLE = "IDLE_BLANK"
 SEGMENT_STATE_ACTIVE = "SIGNING_ACTIVE"
 SEGMENT_STATE_END_CONFIRM = "END_CONFIRM"
 SEGMENT_STATE_COOLDOWN = "FORCED_FINALIZE_COOLDOWN"
-SEGMENT_STATE_REARMING = "REARMING"
 
 POSE_SIZE = 33 * 3
 HAND_SIZE = 21 * 3
@@ -56,9 +55,6 @@ class AutoTriggerConfig:
     reference_seed_motion_threshold: float = 0.035
     reference_rest_distance_threshold: float = 0.28
     reference_departure_distance_threshold: float = 0.10
-    adaptive_rearm_enabled: bool = False
-    adaptive_rearm_hold_sec: float = 0.50
-    adaptive_rearm_requires_knee_rest: bool = False
     temporal_classifier_enabled: bool = False
     temporal_start_probability_threshold: float = 0.55
     temporal_rest_probability_threshold: float = 0.55
@@ -92,8 +88,6 @@ class AutoTriggerConfig:
             or self.reference_departure_distance_threshold <= 0
         ):
             raise ValueError("Reference pose distance thresholds must be positive.")
-        if self.adaptive_rearm_hold_sec < 0:
-            raise ValueError("Adaptive re-arm hold must be non-negative.")
         if not 0 < self.temporal_start_probability_threshold < 1:
             raise ValueError("Temporal start probability threshold must be in (0, 1).")
         if not 0 < self.temporal_rest_probability_threshold < 1:
@@ -435,10 +429,6 @@ class AutoTriggerEngine:
         self._reference_wrist_signatures: list[np.ndarray] = []
         self._rest_reference_signature: np.ndarray | None = None
         self._rest_wrist_reference_signature: np.ndarray | None = None
-        self._rearm_start_sec: float | None = None
-        self._rearm_signatures: list[np.ndarray] = []
-        self._rearm_wrist_signatures: list[np.ndarray] = []
-        self._rearm_ready = False
 
     def reset(self) -> None:
         self.state = SEGMENT_STATE_IDLE
@@ -455,7 +445,6 @@ class AutoTriggerEngine:
         self._reference_wrist_signatures = []
         self._rest_reference_signature = None
         self._rest_wrist_reference_signature = None
-        self._clear_rearm_window()
 
     def update(
         self,
@@ -474,27 +463,12 @@ class AutoTriggerEngine:
         self._update_rest_reference(timestamp_sec, analysis)
 
         if self.state == SEGMENT_STATE_COOLDOWN:
-            if self.config.adaptive_rearm_enabled:
-                self._update_rearm(
-                    timestamp_sec,
-                    analysis,
-                    transition_when_ready=False,
-                )
             if timestamp_sec < self._cooldown_until_sec:
                 return None
+            self.state = SEGMENT_STATE_IDLE
             self.clip_start_sec = None
             self._pre_roll.clear()
             self._low_motion_start_sec = None
-            if self.config.adaptive_rearm_enabled:
-                self.state = SEGMENT_STATE_REARMING
-                if self._rearm_ready:
-                    self._complete_rearm()
-                return None
-            self.state = SEGMENT_STATE_IDLE
-
-        if self.state == SEGMENT_STATE_REARMING:
-            self._update_rearm(timestamp_sec, analysis)
-            return None
 
         if self.state == SEGMENT_STATE_IDLE:
             return self._update_idle(sample, analysis)
@@ -513,20 +487,8 @@ class AutoTriggerEngine:
             if rest_candidate:
                 self.state = SEGMENT_STATE_END_CONFIRM
                 self._end_votes = deque([(timestamp_sec, True)])
-                if self.config.adaptive_rearm_enabled:
-                    self._update_rearm(
-                        timestamp_sec,
-                        analysis,
-                        transition_when_ready=False,
-                    )
             return None
 
-        if self.config.adaptive_rearm_enabled:
-            self._update_rearm(
-                timestamp_sec,
-                analysis,
-                transition_when_ready=False,
-            )
         self._end_votes.append((timestamp_sec, rest_candidate))
         cutoff = timestamp_sec - self.config.end_hold_sec
         while self._end_votes and self._end_votes[0][0] < cutoff - 1e-9:
@@ -535,7 +497,6 @@ class AutoTriggerEngine:
         if not any(vote for _, vote in self._end_votes):
             self.state = SEGMENT_STATE_ACTIVE
             self._end_votes.clear()
-            self._clear_rearm_window()
             return None
 
         window_elapsed = timestamp_sec - self._end_votes[0][0]
@@ -601,10 +562,7 @@ class AutoTriggerEngine:
         return None
 
     def _is_start_candidate(self, analysis: AutoFrameAnalysis) -> bool:
-        if self.config.reference_rest_enabled and (
-            self._rest_reference_signature is None
-            and self._rest_wrist_reference_signature is None
-        ):
+        if self.config.reference_rest_enabled and self._rest_reference_signature is None:
             return False
         reference_distance = self._reference_distance(analysis)
         departed_reference_pose = bool(
@@ -666,12 +624,14 @@ class AutoTriggerEngine:
         return None
 
     def _update_rest_reference(self, timestamp_sec: float, analysis: AutoFrameAnalysis) -> None:
-        if not self.config.reference_rest_enabled or (
-            self._rest_reference_signature is not None
-            or self._rest_wrist_reference_signature is not None
-        ):
+        if not self.config.reference_rest_enabled or self._rest_reference_signature is not None:
             return
-        eligible = self._is_stable_reference_sample(analysis)
+        eligible = bool(
+            analysis.rest_signature is not None
+            and analysis.wrist_rest_signature is not None
+            and analysis.explicit_hands_detected == 2
+            and analysis.effective_motion_score <= self.config.reference_seed_motion_threshold
+        )
         # Do not start the countdown from camera-open: pose/hand landmarks can
         # be absent for the first frames while iVCam autofocus settles.
         if not eligible:
@@ -680,108 +640,17 @@ class AutoTriggerEngine:
             return
         if self._reference_seed_start_sec is None:
             self._reference_seed_start_sec = timestamp_sec
-        if analysis.rest_signature is not None:
-            self._reference_signatures.append(
-                np.asarray(analysis.rest_signature, dtype=np.float32)
-            )
-        assert analysis.wrist_rest_signature is not None
+        self._reference_signatures.append(np.asarray(analysis.rest_signature, dtype=np.float32))
         self._reference_wrist_signatures.append(
             np.asarray(analysis.wrist_rest_signature, dtype=np.float32)
         )
         if timestamp_sec - self._reference_seed_start_sec >= self.config.reference_seed_sec:
-            self._set_rest_reference(
-                self._reference_signatures,
-                self._reference_wrist_signatures,
-            )
-
-    def _is_stable_reference_sample(self, analysis: AutoFrameAnalysis) -> bool:
-        return bool(
-            analysis.wrist_rest_signature is not None
-            and analysis.wrists_detected
-            and analysis.torso_valid
-            and analysis.effective_motion_score
-            <= self.config.reference_seed_motion_threshold
-        )
-
-    def _is_safe_rearm_sample(self, analysis: AutoFrameAnalysis) -> bool:
-        if not self._is_stable_reference_sample(analysis):
-            return False
-        if not self.config.adaptive_rearm_requires_knee_rest:
-            return True
-        if analysis.hands_on_knees:
-            return True
-        distance = self._reference_distance(analysis)
-        return bool(
-            distance is not None
-            and distance <= self.config.reference_rest_distance_threshold
-        )
-
-    def _update_rearm(
-        self,
-        timestamp_sec: float,
-        analysis: AutoFrameAnalysis,
-        *,
-        transition_when_ready: bool = True,
-    ) -> None:
-        if self._rearm_ready:
-            if transition_when_ready:
-                self._complete_rearm()
-            return
-        if not self._is_safe_rearm_sample(analysis):
-            self._clear_rearm_window()
-            return
-        if self._rearm_start_sec is None:
-            self._rearm_start_sec = timestamp_sec
-        if analysis.rest_signature is not None:
-            self._rearm_signatures.append(
-                np.asarray(analysis.rest_signature, dtype=np.float32)
-            )
-        assert analysis.wrist_rest_signature is not None
-        self._rearm_wrist_signatures.append(
-            np.asarray(analysis.wrist_rest_signature, dtype=np.float32)
-        )
-        if (
-            timestamp_sec - self._rearm_start_sec + 1e-9
-            < self.config.adaptive_rearm_hold_sec
-        ):
-            return
-        self._rearm_ready = True
-        if transition_when_ready:
-            self._complete_rearm()
-
-    def _complete_rearm(self) -> None:
-        if not self._rearm_ready:
-            return
-        self._set_rest_reference(
-            self._rearm_signatures,
-            self._rearm_wrist_signatures,
-        )
-        self.state = SEGMENT_STATE_IDLE
-        self._pre_roll.clear()
-        self._active_start_sec = None
-        self._clear_rearm_window()
-
-    def _set_rest_reference(
-        self,
-        signatures: list[np.ndarray],
-        wrist_signatures: list[np.ndarray],
-    ) -> None:
-        if not wrist_signatures:
-            raise ValueError("A wrist reference requires at least one sample.")
-        self._rest_reference_signature = (
-            np.median(np.stack(signatures), axis=0).astype(np.float32)
-            if signatures
-            else None
-        )
-        self._rest_wrist_reference_signature = np.median(
-            np.stack(wrist_signatures), axis=0
-        ).astype(np.float32)
-
-    def _clear_rearm_window(self) -> None:
-        self._rearm_start_sec = None
-        self._rearm_signatures = []
-        self._rearm_wrist_signatures = []
-        self._rearm_ready = False
+            self._rest_reference_signature = np.median(
+                np.stack(self._reference_signatures), axis=0
+            ).astype(np.float32)
+            self._rest_wrist_reference_signature = np.median(
+                np.stack(self._reference_wrist_signatures), axis=0
+            ).astype(np.float32)
 
     def _finalize(
         self,
@@ -827,6 +696,4 @@ class AutoTriggerEngine:
         self._active_start_sec = None
         self._low_motion_start_sec = None
         self._end_votes.clear()
-        if reason == "timeout_finalize" or not self.config.adaptive_rearm_enabled:
-            self._clear_rearm_window()
         return result
