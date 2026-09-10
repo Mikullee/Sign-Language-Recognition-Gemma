@@ -11,6 +11,8 @@ import numpy as np
 from recognition.realtime.auto_trigger import (
     SEGMENT_STATE_ACTIVE,
     SEGMENT_STATE_COOLDOWN,
+    SEGMENT_STATE_IDLE,
+    SEGMENT_STATE_REARMING,
     AutoFrameAnalysis,
     AutoTriggerConfig,
     AutoTriggerEngine,
@@ -44,6 +46,21 @@ def analysis(
 
 def frame(value: float) -> np.ndarray:
     return np.full(225, value, dtype=np.float32)
+
+
+def reference_analysis(
+    *,
+    rest: bool,
+    motion: float,
+    palm_value: float | None,
+    wrist_value: float,
+    hands_detected: int = 2,
+) -> AutoFrameAnalysis:
+    return replace(
+        analysis(rest=rest, motion=motion, hands_detected=hands_detected),
+        rest_signature=(None if palm_value is None else (palm_value,) * 6),
+        wrist_rest_signature=(wrist_value,) * 6,
+    )
 
 
 def body_frame(
@@ -418,6 +435,114 @@ class AutoTriggerEngineTests(unittest.TestCase):
         assert event is not None
         self.assertEqual(event.reason, "reference_rest_finalize")
 
+    def test_timeout_requires_stable_rest_before_another_start(self):
+        config = AutoTriggerConfig(
+            start_motion_threshold=0.01,
+            blank_motion_threshold=0.02,
+            start_hold_sec=0.10,
+            pre_roll_sec=0.0,
+            max_segment_sec=0.50,
+            min_segment_sec=0.10,
+            cooldown_sec=0.10,
+            reference_rest_enabled=True,
+            reference_seed_sec=0.20,
+            adaptive_rearm_enabled=True,
+            adaptive_rearm_hold_sec=0.20,
+        )
+        engine = AutoTriggerEngine(config)
+
+        for timestamp in (0.0, 0.1, 0.2):
+            engine.update(
+                frame(timestamp),
+                reference_analysis(
+                    rest=True,
+                    motion=0.0,
+                    palm_value=0.0,
+                    wrist_value=0.0,
+                ),
+                timestamp,
+            )
+
+        event = None
+        for timestamp in (0.3, 0.4, 0.5, 0.6, 0.7, 0.8):
+            event = engine.update(
+                frame(timestamp),
+                reference_analysis(
+                    rest=False,
+                    motion=0.08,
+                    palm_value=0.5,
+                    wrist_value=0.5,
+                ),
+                timestamp,
+            )
+
+        self.assertIsNotNone(event)
+        assert event is not None
+        self.assertEqual(event.reason, "timeout_finalize")
+
+        for timestamp in (0.9, 1.0, 1.1):
+            self.assertIsNone(
+                engine.update(
+                    frame(timestamp),
+                    reference_analysis(
+                        rest=False,
+                        motion=0.08,
+                        palm_value=0.5,
+                        wrist_value=0.5,
+                    ),
+                    timestamp,
+                )
+            )
+        self.assertEqual(engine.state, SEGMENT_STATE_REARMING)
+
+        for timestamp in (1.2, 1.3, 1.4):
+            engine.update(
+                frame(timestamp),
+                reference_analysis(
+                    rest=True,
+                    motion=0.0,
+                    palm_value=0.2,
+                    wrist_value=0.2,
+                ),
+                timestamp,
+            )
+        self.assertEqual(engine.state, SEGMENT_STATE_IDLE)
+        np.testing.assert_allclose(engine._rest_wrist_reference_signature, 0.2)
+
+    def test_reference_can_seed_from_pose_wrists_without_hand_landmarks(self):
+        config = AutoTriggerConfig(
+            start_motion_threshold=0.01,
+            reference_rest_enabled=True,
+            reference_seed_sec=0.20,
+        )
+        engine = AutoTriggerEngine(config)
+        for timestamp in (0.0, 0.1, 0.2):
+            engine.update(
+                frame(timestamp),
+                reference_analysis(
+                    rest=True,
+                    motion=0.0,
+                    palm_value=None,
+                    wrist_value=0.1,
+                    hands_detected=0,
+                ),
+                timestamp,
+            )
+
+        self.assertIsNone(engine._rest_reference_signature)
+        np.testing.assert_allclose(engine._rest_wrist_reference_signature, 0.1)
+        self.assertTrue(
+            engine._is_start_candidate(
+                reference_analysis(
+                    rest=False,
+                    motion=0.08,
+                    palm_value=None,
+                    wrist_value=0.5,
+                    hands_detected=0,
+                )
+            )
+        )
+
 
 class AutoFrameAnalysisTests(unittest.TestCase):
     def test_pose_wrist_rest_signature_survives_missing_hand_landmarks(self):
@@ -511,6 +636,10 @@ class AutoFrameAnalysisTests(unittest.TestCase):
 
 
 class AutoTriggerConfigTests(unittest.TestCase):
+    def test_adaptive_rearm_hold_must_be_non_negative(self):
+        with self.assertRaisesRegex(ValueError, "Adaptive re-arm hold"):
+            AutoTriggerConfig(adaptive_rearm_hold_sec=-0.1)
+
     def test_json_values_load_and_explicit_overrides_win(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "auto.json"
