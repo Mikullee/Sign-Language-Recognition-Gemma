@@ -14,9 +14,11 @@ import pytest
 from scripts.build_mac_auto_trigger_package import (
     ANNOTATED_VIDEOS,
     BROWSER_ASSET_PATHS,
+    EXPECTED_VIDEO_SHA256,
     PYTHON_MODEL_PATHS,
     _copy_tracked_tree,
     validate_annotation_links,
+    validate_boundary_videos,
     validate_package_manifest,
     verify_archive,
 )
@@ -40,6 +42,7 @@ def test_release_contract_names_all_runtime_and_benchmark_assets() -> None:
         Path("webservice/vendor/mediapipe/pose_landmarker_lite.task"),
     }
     assert ANNOTATED_VIDEOS == ("你好.mp4", "我肚子餓.mp4", "晚安.mp4")
+    assert set(EXPECTED_VIDEO_SHA256) == set(ANNOTATED_VIDEOS)
 
 
 def test_annotation_links_must_resolve_inside_package(tmp_path: Path) -> None:
@@ -51,13 +54,29 @@ def test_annotation_links_must_resolve_inside_package(tmp_path: Path) -> None:
     with csv_path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.writer(handle)
         writer.writerow(["video_path", "expected_label", "start_sec", "end_sec"])
-        writer.writerow(["../videos/auto_trigger/你好.mp4", "你好", "1.333", "4.430"])
+        writer.writerows(
+            [
+                ["../videos/auto_trigger/我肚子餓.mp4", "我肚子餓", "2.167", "6.800"],
+                ["../videos/auto_trigger/你好.mp4", "你好", "1.333", "4.430"],
+                ["../videos/auto_trigger/晚安.mp4", "晚安", "1.433", "6.167"],
+            ]
+        )
 
-    with pytest.raises(FileNotFoundError, match="你好.mp4"):
+    for name in ANNOTATED_VIDEOS:
+        if name != "我肚子餓.mp4":
+            (video_dir / name).write_bytes(b"video")
+    with pytest.raises(FileNotFoundError, match="我肚子餓.mp4"):
         validate_annotation_links(tmp_path)
 
-    (video_dir / "你好.mp4").write_bytes(b"video")
+    (video_dir / "我肚子餓.mp4").write_bytes(b"video")
     validate_annotation_links(tmp_path)
+
+
+def test_boundary_video_source_rejects_wrong_same_named_files(tmp_path: Path) -> None:
+    for name in ANNOTATED_VIDEOS:
+        (tmp_path / name).write_bytes(b"not the canonical annotated clip")
+    with pytest.raises(ValueError, match="你好.mp4"):
+        validate_boundary_videos(tmp_path)
 
 
 def test_verify_archive_rejects_missing_required_payload(tmp_path: Path) -> None:
@@ -75,6 +94,7 @@ def test_mac_scripts_are_loopback_only_and_use_web_trigger_profile() -> None:
 
     assert "Darwin" in setup
     assert "arm64" in setup
+    assert "(3, 12)" in setup
     assert "requirements-transformer.txt" in setup
     assert "verify_mac_auto_trigger_package.py" in setup
     assert "--host 127.0.0.1" in launch
@@ -102,6 +122,7 @@ def test_handoff_document_states_scope_and_known_limitations() -> None:
     assert "timeout" in text
     assert "./scripts/setup_mac_auto_trigger.sh" in text
     assert "./scripts/run_mac_auto_trigger.sh" in text
+    assert "私人" in text
 
 
 def test_manifest_marks_candidate_as_not_field_accepted(tmp_path: Path) -> None:

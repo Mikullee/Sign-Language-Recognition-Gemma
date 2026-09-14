@@ -10,7 +10,6 @@ import shutil
 import subprocess
 import tempfile
 import zipfile
-from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 
 try:
@@ -33,6 +32,16 @@ BROWSER_ASSET_PATHS = (
     Path("webservice/vendor/mediapipe/pose_landmarker_lite.task"),
 )
 ANNOTATED_VIDEOS = ("你好.mp4", "我肚子餓.mp4", "晚安.mp4")
+EXPECTED_VIDEO_SHA256 = {
+    "你好.mp4": "675af2198df8e111f323b3eeac4316ef4cb7c495bb170992f96355bb2a1255b6",
+    "我肚子餓.mp4": "d09e00758d5274231cd452b2a7f0d477c8a2c42f8e98145965d31ab49519b3db",
+    "晚安.mp4": "5d827237e7ad4af15b9d2c28c2d34da6dfa43387afb487ae806674cf52988d64",
+}
+EXPECTED_ANNOTATIONS = {
+    "我肚子餓.mp4": ("我肚子餓", 2.167, 6.800),
+    "你好.mp4": ("你好", 1.333, 4.430),
+    "晚安.mp4": ("晚安", 1.433, 6.167),
+}
 ANNOTATION_PATH = Path("data/annotations/auto_trigger_three_videos.csv")
 PACKAGE_MANIFEST = Path("MAC_PACKAGE_MANIFEST.json")
 MODEL_BUNDLE_FILES = (
@@ -77,8 +86,27 @@ def validate_annotation_links(package_root: Path) -> None:
         rows = list(csv.DictReader(handle))
     if not rows:
         raise ValueError("annotation CSV contains no video rows")
+    if len(rows) != len(EXPECTED_ANNOTATIONS):
+        raise ValueError(f"annotation CSV must contain exactly {len(EXPECTED_ANNOTATIONS)} rows")
+    seen: set[str] = set()
     for row in rows:
         relative = row.get("video_path", "").strip()
+        name = PurePosixPath(relative).name
+        if name not in EXPECTED_ANNOTATIONS or name in seen:
+            raise ValueError(f"unexpected or duplicate annotation row: {name}")
+        expected_label, expected_start, expected_end = EXPECTED_ANNOTATIONS[name]
+        try:
+            start_sec = float(row.get("start_sec", ""))
+            end_sec = float(row.get("end_sec", ""))
+        except ValueError as exc:
+            raise ValueError(f"invalid boundary seconds for {name}") from exc
+        if row.get("expected_label", "").strip() != expected_label:
+            raise ValueError(f"unexpected label for {name}")
+        if abs(start_sec - expected_start) > 1e-6 or abs(end_sec - expected_end) > 1e-6:
+            raise ValueError(f"unexpected boundary annotation for {name}")
+        if not 0 <= start_sec < end_sec:
+            raise ValueError(f"invalid boundary order for {name}")
+        seen.add(name)
         target = (csv_path.parent / relative).resolve()
         try:
             target.relative_to(package_root)
@@ -86,6 +114,11 @@ def validate_annotation_links(package_root: Path) -> None:
             raise ValueError(f"annotation path escapes package: {relative}") from exc
         if not target.is_file():
             raise FileNotFoundError(f"annotated video missing: {target.name}")
+
+
+def validate_boundary_videos(video_dir: Path) -> None:
+    for name, expected in EXPECTED_VIDEO_SHA256.items():
+        _verify_known_asset(video_dir / name, expected)
 
 
 def _verify_known_asset(path: Path, expected: str) -> None:
@@ -151,6 +184,7 @@ def validate_release_tree(package_root: Path) -> None:
     label_map = json.loads((bundle_root / "label_map_knee42.json").read_text(encoding="utf-8"))
     if len(label_map.get("idx_to_label", [])) != 42:
         raise ValueError("shipped model label map is not Knee42")
+    validate_boundary_videos(package_root / "data/videos/auto_trigger")
     validate_annotation_links(package_root)
     validate_package_manifest(package_root)
 
@@ -247,6 +281,7 @@ def build_package(
     video_dir = video_dir.resolve()
     models_dir = (models_dir or source_root / "models").resolve()
     vendor_dir = (vendor_dir or source_root / "webservice/vendor/mediapipe").resolve()
+    validate_boundary_videos(video_dir)
     commit = _git_output(source_root, "rev-parse", "HEAD")
     short_commit = commit[:8]
     branch = _git_output(source_root, "branch", "--show-current")
@@ -289,7 +324,8 @@ def build_package(
             "model_retraining_required": False,
             "source_commit": commit,
             "source_branch": branch,
-            "created_utc": datetime.now(timezone.utc).isoformat(),
+            "source_commit_time": _git_output(source_root, "show", "-s", "--format=%cI", "HEAD"),
+            "intended_release_visibility": "private",
             "model_id": "knee42-transformer-v12",
             "class_count": 42,
             "annotated_video_count": len(ANNOTATED_VIDEOS),

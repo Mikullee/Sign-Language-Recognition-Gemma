@@ -1,6 +1,8 @@
 # Mac 自動切段交接包
 
-這個 GitHub prerelease ZIP 是目前 Web 自動切段的「調校候選版」，目的在讓 Apple Silicon Mac 直接接手現場測試。分類模型已包含在套件內，**不需要重訓**。
+這個私人 GitHub repository 的 prerelease ZIP 是目前 Web 自動切段的「調校候選版」，目的在讓 Apple Silicon Mac 直接接手現場測試。分類模型已包含在套件內，**不需要重訓**。
+
+完整 ZIP 含人物測試影片與 MediaPipe 官方二進位，只能放在 `Mikullee/Knee42-Private-Reproduction-Data` 的私人 Release。公開的 `Sign-Language-Recognition-Gemma` repository 只保存可審查的程式碼、模型與打包工具，不公開人物影片，也不直接散布 MediaPipe `.task`／WASM。
 
 ## 安裝與啟動
 
@@ -14,7 +16,7 @@ chmod +x scripts/setup_mac_auto_trigger.sh scripts/run_mac_auto_trigger.sh
 
 然後開啟 `http://127.0.0.1:8642`。服務只綁在本機 loopback，不會開放給區網或公網。
 
-需求：Apple Silicon Mac、macOS 14 以上、Python 3.10–3.14。Intel Mac 不適用這份固定版本套件。
+需求：Apple Silicon Mac、macOS 14 以上、Python 3.12–3.14。Intel Mac 不適用這份固定版本套件；NumPy 2.5.0 也不支援 Python 3.10／3.11。
 
 ## 套件包含內容
 

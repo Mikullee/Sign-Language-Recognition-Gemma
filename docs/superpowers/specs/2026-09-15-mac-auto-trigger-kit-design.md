@@ -2,7 +2,7 @@
 
 日期：2026-09-15  
 基準分支：`fix/web-auto-trigger-live-tuning`  
-發布型態：GitHub prerelease 的單一 ZIP
+發布型態：私人資料 repository 的 GitHub prerelease 單一 ZIP
 
 ## 目標
 
@@ -12,8 +12,9 @@
 
 - 保留目前 Transformer v12、42 類模型，不重訓分類模型。
 - 打包目前 Web 自動切段候選分支，不宣稱切段已完成驗收。
-- Release ZIP 包含 Git 追蹤的原始碼、模型 bundle、兩個 Python MediaPipe `.task`、瀏覽器 MediaPipe WASM、三支人工標註影片及 CSV。
+- 私人 Release ZIP 包含 Git 追蹤的原始碼、模型 bundle、兩個 Python MediaPipe `.task`、瀏覽器 MediaPipe WASM、三支人工標註影片及 CSV。
 - Git 儲存庫不直接追蹤第三方二進位資產與影片；它們只存在於 Release 資產。
+- 完整 ZIP 只發布到 `Knee42-Private-Reproduction-Data`；公開程式 repository 不新增人物影片或 MediaPipe 二進位。
 - 提供 Mac 安裝、驗證與啟動腳本，以及一份已知限制與後續工作說明。
 
 ## 使用流程
@@ -37,4 +38,3 @@
 - 打包工具能從乾淨的 Git 提交建立 ZIP，並拒絕缺檔或雜湊錯誤的資產。
 - ZIP 解壓後的內部驗證命令通過，模型 bundle 維持 42 類。
 - 完整專案測試通過，分支推送 GitHub，prerelease 含 ZIP 與 SHA-256 檔。
-

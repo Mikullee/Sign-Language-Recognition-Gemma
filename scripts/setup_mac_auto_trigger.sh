@@ -21,8 +21,8 @@ fi
 
 python3 - <<'PY'
 import sys
-if not ((3, 10) <= sys.version_info[:2] < (3, 15)):
-    raise SystemExit("錯誤：需要 Python 3.10–3.14。")
+if not ((3, 12) <= sys.version_info[:2] < (3, 15)):
+    raise SystemExit("錯誤：固定的 NumPy 2.5.0 需要 Python 3.12–3.14。")
 PY
 
 python3 scripts/verify_mac_auto_trigger_package.py

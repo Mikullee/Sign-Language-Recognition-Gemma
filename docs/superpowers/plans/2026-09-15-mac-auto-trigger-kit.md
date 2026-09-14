@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Publish one reproducible GitHub prerelease ZIP that lets an Apple Silicon Mac install, verify, and launch the current Knee42 Web auto-trigger candidate with its model, runtime assets, and annotated boundary videos.
+**Goal:** Publish one reproducible private GitHub prerelease ZIP that lets an Apple Silicon Mac install, verify, and launch the current Knee42 Web auto-trigger candidate with its model, runtime assets, and annotated boundary videos.
 
 **Architecture:** Keep large third-party assets and videos out of Git history. A Python builder exports tracked files from the current commit, validates and injects local runtime assets and benchmark videos, then writes a deterministic ZIP plus SHA-256. Two small shell scripts install a local virtual environment and start the loopback-only Web service.
 
@@ -62,5 +62,5 @@
 - [ ] Run `git diff --check` and inspect `git status`.
 - [ ] Commit the package tooling and documentation.
 - [ ] Push `fix/web-auto-trigger-live-tuning`.
-- [ ] Create a GitHub prerelease for the exact commit and upload the ZIP plus SHA-256.
+- [ ] Create a prerelease in the private reproduction-data repository for the exact public-code commit and upload the ZIP plus SHA-256.
 - [ ] Verify the remote release metadata and downloadable asset sizes.
