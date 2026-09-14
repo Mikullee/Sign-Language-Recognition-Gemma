@@ -157,6 +157,23 @@ def test_extracted_package_manifest_detects_tampering(tmp_path: Path) -> None:
         validate_package_manifest(tmp_path)
 
 
+def test_extracted_package_manifest_rejects_unlisted_files(tmp_path: Path) -> None:
+    payload = tmp_path / "payload.txt"
+    payload.write_text("listed", encoding="utf-8")
+    manifest = {
+        "field_accepted": False,
+        "model_retraining_required": False,
+        "files": {"payload.txt": hashlib.sha256(b"listed").hexdigest()},
+    }
+    (tmp_path / "MAC_PACKAGE_MANIFEST.json").write_text(
+        json.dumps(manifest), encoding="utf-8"
+    )
+    (tmp_path / "unexpected.txt").write_text("not listed", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="unlisted package files.*unexpected.txt"):
+        validate_package_manifest(tmp_path)
+
+
 @pytest.mark.skipif(shutil.which("git") is None, reason="git is required")
 def test_tracked_export_uses_committed_bytes_not_dirty_worktree(tmp_path: Path) -> None:
     source = tmp_path / "source"

@@ -129,6 +129,29 @@ def _verify_known_asset(path: Path, expected: str) -> None:
         raise ValueError(f"SHA-256 mismatch for {path}: expected {expected}, got {actual}")
 
 
+def _is_runtime_generated(relative: str) -> bool:
+    pure = PurePosixPath(relative)
+    return (
+        (pure.parts and pure.parts[0] == ".venv")
+        or "__pycache__" in pure.parts
+        or pure.suffix == ".pyc"
+        or pure.parts[:2] in {
+            ("webservice", "certs"),
+            ("webservice", "uploads"),
+        }
+        or pure.suffix in {".log", ".pid"}
+    )
+
+
+def _require_exact_manifest_set(actual: set[str], recorded: set[str]) -> None:
+    missing = sorted(recorded - actual)
+    if missing:
+        raise ValueError("manifest references missing files: " + ", ".join(missing))
+    unlisted = sorted(actual - recorded)
+    if unlisted:
+        raise ValueError("unlisted package files: " + ", ".join(unlisted))
+
+
 def validate_package_manifest(package_root: Path) -> dict:
     manifest_path = package_root / PACKAGE_MANIFEST
     if not manifest_path.is_file():
@@ -139,7 +162,16 @@ def validate_package_manifest(package_root: Path) -> dict:
     if manifest.get("model_retraining_required") is not False:
         raise ValueError("package must state that model retraining is not required")
     package_root = package_root.resolve()
-    for relative, expected in manifest.get("files", {}).items():
+    recorded_files = manifest.get("files", {})
+    actual_files = {
+        path.relative_to(package_root).as_posix()
+        for path in package_root.rglob("*")
+        if path.is_file()
+        and path.name != PACKAGE_MANIFEST.name
+        and not _is_runtime_generated(path.relative_to(package_root).as_posix())
+    }
+    _require_exact_manifest_set(actual_files, set(recorded_files))
+    for relative, expected in recorded_files.items():
         pure = PurePosixPath(relative)
         if pure.is_absolute() or ".." in pure.parts:
             raise ValueError(f"unsafe manifest path: {relative}")
@@ -218,7 +250,10 @@ def verify_archive(archive: Path) -> dict:
             raise ValueError("candidate package must not claim field acceptance")
         if manifest.get("model_retraining_required") is not False:
             raise ValueError("package must state that model retraining is not required")
-        for relative, expected in manifest.get("files", {}).items():
+        recorded_files = manifest.get("files", {})
+        actual_files = set(members) - {PACKAGE_MANIFEST.as_posix()}
+        _require_exact_manifest_set(actual_files, set(recorded_files))
+        for relative, expected in recorded_files.items():
             member = members.get(relative)
             if member is None:
                 raise ValueError(f"manifest references missing file: {relative}")
