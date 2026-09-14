@@ -93,7 +93,7 @@ Run:
 
 ```powershell
 git grep -n -I -e '太貴了' -e '很貴' -- README.md artifacts/realtime/best_current/display_text_map.json docs/evaluation/live_check_42.csv scripts/validate_knee42_data.py
-git diff --exit-code ed7088e -- artifacts/realtime/best_current/label_map_knee42.json artifacts/realtime/best_current/best_model.pt
+git diff --exit-code 6beeb0e -- artifacts/realtime/best_current/label_map_knee42.json artifacts/realtime/best_current/best_model.pt
 ```
 
 Expected: 指定的實際來源中舊文字零命中，新文字出現在 runtime display map、validator metadata、評估文件與 README；label map 與模型權重無差異。

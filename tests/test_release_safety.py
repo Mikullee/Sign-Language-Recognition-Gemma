@@ -68,6 +68,15 @@ class ReleaseSafetyTests(unittest.TestCase):
         self.assertFalse(feature["mask_concatenated"])
         self.assertEqual(card["model_id"], "knee42-transformer-v12")
 
+    def test_k42_26_uses_the_revised_display_text_without_changing_its_class_index(self):
+        bundle = ROOT / "artifacts" / "realtime" / "best_current"
+        label_map = json.loads((bundle / "label_map_knee42.json").read_text(encoding="utf-8"))
+        display_map = json.loads((bundle / "display_text_map.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(label_map["label_to_idx"]["K42_26"], 25)
+        self.assertEqual(label_map["idx_to_label"][25], "K42_26")
+        self.assertEqual(display_map["K42_26"], "很貴")
+
     def test_model_card_does_not_present_the_mixed_split_value_as_accuracy(self):
         """The released weights saw every signer, so they carry no held-out score."""
         card = json.loads(
