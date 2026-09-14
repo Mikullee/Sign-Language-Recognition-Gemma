@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
+import shutil
 import subprocess
 import sys
 import zipfile
@@ -13,7 +15,9 @@ from scripts.build_mac_auto_trigger_package import (
     ANNOTATED_VIDEOS,
     BROWSER_ASSET_PATHS,
     PYTHON_MODEL_PATHS,
+    _copy_tracked_tree,
     validate_annotation_links,
+    validate_package_manifest,
     verify_archive,
 )
 
@@ -112,3 +116,40 @@ def test_manifest_marks_candidate_as_not_field_accepted(tmp_path: Path) -> None:
 
     assert loaded["field_accepted"] is False
     assert loaded["model_retraining_required"] is False
+
+
+def test_extracted_package_manifest_detects_tampering(tmp_path: Path) -> None:
+    payload = tmp_path / "payload.txt"
+    payload.write_text("original", encoding="utf-8")
+    manifest = {
+        "field_accepted": False,
+        "model_retraining_required": False,
+        "files": {"payload.txt": hashlib.sha256(b"original").hexdigest()},
+    }
+    (tmp_path / "MAC_PACKAGE_MANIFEST.json").write_text(
+        json.dumps(manifest), encoding="utf-8"
+    )
+    validate_package_manifest(tmp_path)
+
+    payload.write_text("changed", encoding="utf-8")
+    with pytest.raises(ValueError, match="payload.txt"):
+        validate_package_manifest(tmp_path)
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git is required")
+def test_tracked_export_uses_committed_bytes_not_dirty_worktree(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    destination = tmp_path / "export"
+    source.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=source, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=source, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=source, check=True)
+    tracked = source / "value.txt"
+    tracked.write_text("committed", encoding="utf-8")
+    subprocess.run(["git", "add", "value.txt"], cwd=source, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "fixture"], cwd=source, check=True)
+    tracked.write_text("dirty", encoding="utf-8")
+
+    _copy_tracked_tree(source, destination)
+
+    assert (destination / "value.txt").read_text(encoding="utf-8") == "committed"

@@ -96,6 +96,32 @@ def _verify_known_asset(path: Path, expected: str) -> None:
         raise ValueError(f"SHA-256 mismatch for {path}: expected {expected}, got {actual}")
 
 
+def validate_package_manifest(package_root: Path) -> dict:
+    manifest_path = package_root / PACKAGE_MANIFEST
+    if not manifest_path.is_file():
+        raise FileNotFoundError(f"package manifest missing: {manifest_path}")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if manifest.get("field_accepted") is not False:
+        raise ValueError("candidate package must not claim field acceptance")
+    if manifest.get("model_retraining_required") is not False:
+        raise ValueError("package must state that model retraining is not required")
+    package_root = package_root.resolve()
+    for relative, expected in manifest.get("files", {}).items():
+        pure = PurePosixPath(relative)
+        if pure.is_absolute() or ".." in pure.parts:
+            raise ValueError(f"unsafe manifest path: {relative}")
+        target = package_root.joinpath(*pure.parts).resolve()
+        try:
+            target.relative_to(package_root)
+        except ValueError as exc:
+            raise ValueError(f"manifest path escapes package: {relative}") from exc
+        if not target.is_file():
+            raise ValueError(f"manifest references missing file: {relative}")
+        if sha256_file(target) != expected:
+            raise ValueError(f"package SHA-256 mismatch for {relative}")
+    return manifest
+
+
 def validate_release_tree(package_root: Path) -> None:
     missing = sorted(str(path) for path in _required_release_paths() if not (package_root / path).is_file())
     if missing:
@@ -126,6 +152,7 @@ def validate_release_tree(package_root: Path) -> None:
     if len(label_map.get("idx_to_label", [])) != 42:
         raise ValueError("shipped model label map is not Knee42")
     validate_annotation_links(package_root)
+    validate_package_manifest(package_root)
 
 
 def _safe_archive_names(names: list[str]) -> dict[str, str]:
@@ -180,16 +207,24 @@ def _git_output(source_root: Path, *args: str) -> str:
 
 def _copy_tracked_tree(source_root: Path, destination: Path) -> None:
     output = subprocess.run(
-        ["git", "ls-files", "-z"], cwd=source_root, check=True, capture_output=True
+        ["git", "ls-tree", "-r", "-z", "--name-only", "HEAD"],
+        cwd=source_root,
+        check=True,
+        capture_output=True,
     ).stdout
     for raw_name in output.split(b"\0"):
         if not raw_name:
             continue
         relative = Path(os.fsdecode(raw_name))
-        source = source_root / relative
         target = destination / relative
         target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, target)
+        payload = subprocess.run(
+            ["git", "show", f"HEAD:{relative.as_posix()}"],
+            cwd=source_root,
+            check=True,
+            capture_output=True,
+        ).stdout
+        target.write_bytes(payload)
 
 
 def _package_file_hashes(package_root: Path) -> dict[str, str]:
