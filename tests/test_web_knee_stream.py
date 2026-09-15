@@ -94,3 +94,30 @@ def test_ui_uses_rest_gate_not_distance_alone_for_green_confirmation():
     from pathlib import Path
     page = (Path(__file__).resolve().parents[1] / "webservice/static/index.html").read_text(encoding="utf-8")
     assert "const ok = j.rest_candidate === true" in page
+
+
+def test_calibration_diagnostics_distinguish_motion_position_and_progress():
+    service=SimpleNamespace(trigger_config=config(),recognizer=None)
+    result=stream_payload(service,{'session':'clear-calibration-reasons','reset':True,
+        'frames':[payload_frame(float(t)) for t in np.arange(0,.61,.1)]})
+    assert result['calibration_blockers']==[]
+    assert 0 < result['calibration_hold_sec'] < result['calibration_target_sec']
+    assert result['rest_motion_score']==0
+    assert result['wrists_trusted'] is True
+    assert result['diagnostics_version']==2
+    result=stream_payload(service,{'session':'clear-calibration-reasons','frames':[payload_frame(.7,hand_y=.35)]})
+    assert 'not_on_knees' in result['calibration_blockers']
+    assert result['calibration_hold_sec']==0
+
+
+def test_cooldown_diagnostics_use_actual_rearm_speed_limit():
+    from tests.test_web_knee_gate import feed
+    c=WebAutoKnee42Controller(config())
+    for t in np.arange(0,4,.1):
+        event=feed(c,float(t),hand_y=.35 if 1.3<=t<2.8 else .78)
+        if event.infer:
+            break
+    assert event.infer
+    diagnostics=c.engine.calibration_diagnostics(c.last_analysis)
+    assert diagnostics['rest_motion_threshold']==c.config.reference_seed_motion_threshold
+    assert diagnostics['calibration_phase']=='rearm'

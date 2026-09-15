@@ -65,7 +65,7 @@ class WebAutoTriggerTests(unittest.TestCase):
         config = load_web_trigger_config(
             ROOT / "configs" / "auto_trigger_knee_web_live.json"
         )
-        self.assertEqual(config.max_segment_sec, 5.0)
+        self.assertEqual(config.max_segment_sec, 10.0)
         self.assertTrue(config.adaptive_rearm_enabled)
         self.assertEqual(config.adaptive_rearm_hold_sec, 0.5)
         self.assertTrue(config.adaptive_rearm_requires_knee_rest)

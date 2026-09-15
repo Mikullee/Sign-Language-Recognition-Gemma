@@ -408,6 +408,7 @@ def _stream_chunk(config, payload, session_id, entry):
         "last_message": last_message,
         "motion_score": None if last_analysis is None else last_analysis.effective_motion_score,
         "knees_visible": bool(last_analysis and last_analysis.knee_landmarks_valid),
+        **controller.engine.calibration_diagnostics(last_analysis),
         "rest_candidate": bool(last_analysis and controller.engine._is_rest_candidate(last_analysis)),
     }
 

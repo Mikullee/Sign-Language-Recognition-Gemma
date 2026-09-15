@@ -1,6 +1,6 @@
 # Sign-Language-Recognition-Gemma — Knee42
 
-> **Web 膝蓋回位切段候選版**：見 [`docs/web_knee_candidate.md`](docs/web_knee_candidate.md)。已加入可見度檢查、低 FPS 時鐘修正、每句回位校準及同路徑影片回放；沿用 42 類 Transformer v12，無須重訓。真實膝蓋入鏡與跨人效果仍待實測，人物影片未上傳。
+> **Web 最終交接版（2026-09-15）**：使用者已確認目前版本作為最終版基準。新增膝蓋回位防抖、10 秒上限與即時診斷；沿用 42 類 Transformer v12，無須重訓。請依 [`組員換版說明`](docs/web_final_handoff_20260915.md) 下載及同步更新前後端。這是目前使用情境的驗收，不代表已完成跨人量化驗證；人物影片未上傳。
 
 > 42 類固定句型台灣手語辨識系統
 > 單一 RGB 攝影機 → MediaPipe 骨架 → Transformer encoder → Top-1／Top-3 中文句意

@@ -27,7 +27,10 @@ from recognition.realtime.auto_trigger import (
     analyze_frame_vector,
 )
 from recognition.realtime.knee42_controllers import AutoKnee42Controller, ControllerEvent, SegmentEvidence
-from recognition.transformer.knee_geometry import analyze_knee_frame, sanitize_trigger
+from recognition.transformer.knee_geometry import analyze_knee_frame, sanitize_trigger, align_trigger_hands
+from recognition.transformer.knee_motion import KneeRestMotion
+from recognition.transformer.rest_hold import ObservedRestHold
+from recognition.transformer.knee_zone import KneeRestZone
 
 
 SEGMENT_STATE_REARMING = "REARMING"
@@ -46,11 +49,19 @@ class WebAutoTriggerConfig(AutoTriggerConfig):
     body_shift_threshold: float = 0.50
     body_scale_ratio_threshold: float = 1.25
     knee_min_thigh_progress_ratio: float = 0.35
+    rest_motion_grace_sec: float = 0.20
+    rest_motion_soft_ratio: float = 1.5
+    knee_zone_exit_margin: float = 0.08
+    knee_zone_wrist_radius: float = 0.10
 
     def __post_init__(self) -> None:
         super().__post_init__()
         if self.adaptive_rearm_hold_sec < 0:
             raise ValueError("Adaptive re-arm hold must be non-negative.")
+        if not 0 <= self.rest_motion_grace_sec <= .25 or not 1 <= self.rest_motion_soft_ratio <= 2:
+            raise ValueError("Invalid bounded rest-motion tolerance.")
+        if not 0 <= self.knee_zone_exit_margin <= .10 or not 0 < self.knee_zone_wrist_radius <= .15:
+            raise ValueError("Invalid bounded knee-zone hysteresis.")
         if any(isinstance(value, (int, float)) and not np.isfinite(value)
                for value in self.to_dict().values()):
             raise ValueError("Trigger settings must be finite.")
@@ -99,6 +110,12 @@ class WebAutoTriggerEngine(AutoTriggerEngine):
         self.last_analysis = None
         self._end_onset_sec = None
         self._seed_body = self._rearm_body = None
+        self._end_body = None
+        self._seed_samples, self._rearm_samples = [], []
+        self._seed_hold = ObservedRestHold(config.reference_seed_sec, config.rest_motion_grace_sec)
+        self._rearm_hold = ObservedRestHold(config.adaptive_rearm_hold_sec, config.rest_motion_grace_sec)
+        self._end_hold = ObservedRestHold(config.end_hold_sec, config.rest_motion_grace_sec,
+                                          minimum_ratio=max(.8, config.end_rest_vote_ratio))
 
     @property
     def calibrated(self) -> bool:
@@ -110,6 +127,9 @@ class WebAutoTriggerEngine(AutoTriggerEngine):
 
     def reset(self) -> None:
         super().reset()
+        self._clear_seed_window()
+        self._end_hold.clear()
+        self._end_body = None
         self._clear_rearm_window()
         self.reference_revision = 0
         self._body_reference = self._current_body = None
@@ -202,6 +222,8 @@ class WebAutoTriggerEngine(AutoTriggerEngine):
         if self.state == SEGMENT_STATE_IDLE:
             return self._update_idle(sample, analysis)
         self.segment_samples.append(sample)
+        if self.config.knee_gate_enabled:
+            return self._update_knee_end(analysis, timestamp_sec)
         if self.clip_start_sec is not None and timestamp_sec - self.clip_start_sec >= self.config.max_segment_sec:
             return self._finalize(timestamp_sec, timestamp_sec, "timeout_finalize")
         rest = self._is_rest_candidate(analysis)
@@ -242,9 +264,52 @@ class WebAutoTriggerEngine(AutoTriggerEngine):
             return self._finalize(boundary, timestamp_sec, reason, rest_detected_sec=boundary)
         return None
 
+    def _update_knee_end(self, analysis, timestamp_sec):
+        deadline = self.clip_start_sec + self.config.max_segment_sec
+        if self._body_difference(self._end_body, self._current_body):
+            self._end_hold.clear()
+            self._end_body = None
+        expired = timestamp_sec + 1e-9 >= deadline
+        # Only a return already observed before the normal deadline gets grace.
+        pending = self._end_hold.onset is not None and self._end_hold.onset < deadline
+        if expired and (not pending or timestamp_sec > deadline + self.config.end_hold_sec
+                       + self.config.observation_gap_sec + 1e-9):
+            return self._finalize(timestamp_sec, timestamp_sec, 'timeout_finalize')
+        rest = self._is_rest_candidate(analysis)
+        previous_onset = self._end_hold.onset
+        ready = self._end_hold.update(timestamp_sec, good=rest,
+            soft=self._is_soft_rest_sample(analysis, self.config.blank_motion_threshold))
+        self._end_onset_sec = self._end_hold.onset
+        if expired and self._end_onset_sec is not None and self._end_onset_sec >= deadline:
+            return self._finalize(timestamp_sec, timestamp_sec, 'timeout_finalize')
+        if previous_onset != self._end_onset_sec:
+            self._end_body = self._current_body if self._end_onset_sec is not None else None
+        if self._end_onset_sec is None:
+            self.state = SEGMENT_STATE_ACTIVE
+            if expired:
+                return self._finalize(timestamp_sec, timestamp_sec, 'timeout_finalize')
+            return None
+        self.state = SEGMENT_STATE_END_CONFIRM
+        if ready:
+            boundary = self._end_onset_sec
+            reason = 'visible_rest_finalize' if analysis.knee_landmarks_valid else 'reference_rest_finalize'
+            return self._finalize(boundary, timestamp_sec, reason, rest_detected_sec=boundary)
+        return None
+
+    def _is_soft_rest_sample(self, analysis, threshold):
+        # Never bridge lost hands, invisible knees, a chest pause or large motion.
+        return bool(self.config.knee_gate_enabled
+                    and analysis.torso_valid and analysis.wrists_detected
+                    and analysis.wrist_rest_signature is not None
+                    and analysis.knee_landmarks_valid and analysis.hands_on_knees
+                    and getattr(analysis, 'rest_motion_ready', True)
+                    and self._rest_motion(analysis) <= threshold * self.config.rest_motion_soft_ratio)
+
     def _is_start_candidate(self, analysis: AutoFrameAnalysis) -> bool:
         if self.config.knee_gate_enabled and not (analysis.torso_valid and analysis.wrists_detected):
             return False
+        if self.config.knee_gate_enabled and analysis.hands_on_knees:
+            return False  # A motion spike at rest is not a physical departure.
         if self.config.knee_gate_enabled and self._is_rest_candidate(analysis):
             return False
         if self.config.reference_rest_enabled and not self.calibrated:
@@ -278,6 +343,10 @@ class WebAutoTriggerEngine(AutoTriggerEngine):
         if (not self.config.reference_rest_enabled or self.calibrated
                 or self.state != SEGMENT_STATE_IDLE):
             return
+        if self.config.knee_gate_enabled:
+            if self._advance_reference_hold(timestamp_sec, analysis, rearm=False):
+                self._set_rest_reference(self._reference_signatures, self._reference_wrist_signatures)
+            return
         if not self._is_stable_reference_sample(analysis):
             self._clear_seed_window()
             return
@@ -307,9 +376,15 @@ class WebAutoTriggerEngine(AutoTriggerEngine):
             analysis.wrist_rest_signature is not None
             and analysis.wrists_detected
             and analysis.torso_valid
-            and analysis.effective_motion_score
+            and getattr(analysis, 'rest_motion_ready', True)
+            and self._rest_motion(analysis)
             <= self.config.reference_seed_motion_threshold
         )
+
+    @staticmethod
+    def _rest_motion(analysis):
+        score = getattr(analysis, 'rest_motion_score', None)
+        return analysis.effective_motion_score if score is None else score
 
     def _is_safe_rearm_sample(self, analysis: AutoFrameAnalysis) -> bool:
         if not self._is_stable_reference_sample(analysis):
@@ -333,6 +408,11 @@ class WebAutoTriggerEngine(AutoTriggerEngine):
         *,
         transition_when_ready: bool = True,
     ) -> None:
+        if self.config.knee_gate_enabled:
+            self._rearm_ready = self._advance_reference_hold(timestamp_sec, analysis, rearm=True)
+            if self._rearm_ready and transition_when_ready:
+                self._complete_rearm()
+            return
         if not self._is_safe_rearm_sample(analysis):
             self._clear_rearm_window()
             return
@@ -361,6 +441,39 @@ class WebAutoTriggerEngine(AutoTriggerEngine):
         self._rearm_ready = True
         if transition_when_ready:
             self._complete_rearm()
+
+    def _advance_reference_hold(self, timestamp_sec, analysis, *, rearm):
+        hold = self._rearm_hold if rearm else self._seed_hold
+        body = self._rearm_body if rearm else self._seed_body
+        if self._body_difference(body, self._current_body):
+            (self._clear_rearm_window if rearm else self._clear_seed_window)()
+        previous_onset = hold.onset
+        good = self._is_stable_reference_sample(analysis)
+        ready = hold.update(timestamp_sec, good=good,
+            soft=self._is_soft_rest_sample(analysis, self.config.reference_seed_motion_threshold))
+        if previous_onset != hold.onset:
+            if rearm:
+                self._rearm_body = self._current_body if hold.onset is not None else None
+            else:
+                self._seed_body = self._current_body if hold.onset is not None else None
+        samples = self._rearm_samples if rearm else self._seed_samples
+        if hold.onset is None:
+            samples = []
+        else:
+            samples = [s for s in samples if s[0] >= hold.onset]
+            if good:
+                samples.append((timestamp_sec, analysis.rest_signature, analysis.wrist_rest_signature))
+        signatures = [np.asarray(s[1], dtype=np.float32) for s in samples if s[1] is not None]
+        wrists = [np.asarray(s[2], dtype=np.float32) for s in samples]
+        if rearm:
+            self._rearm_start_sec = hold.onset
+            self._rearm_samples = samples
+            self._rearm_signatures, self._rearm_wrist_signatures = signatures, wrists
+        else:
+            self._reference_seed_start_sec = hold.onset
+            self._seed_samples = samples
+            self._reference_signatures, self._reference_wrist_signatures = signatures, wrists
+        return ready
 
     def _complete_rearm(self) -> None:
         if not self._rearm_ready:
@@ -395,6 +508,8 @@ class WebAutoTriggerEngine(AutoTriggerEngine):
         self._clear_seed_window()
 
     def _clear_seed_window(self):
+        self._seed_hold.clear()
+        self._seed_samples = []
         self._reference_seed_start_sec = None
         self._reference_signatures = []
         self._reference_wrist_signatures = []
@@ -423,7 +538,7 @@ class WebAutoTriggerEngine(AutoTriggerEngine):
             return super()._is_rest_candidate(analysis)
         if not (analysis.torso_valid and analysis.wrists_detected):
             return False
-        if analysis.effective_motion_score > self.config.blank_motion_threshold:
+        if not getattr(analysis, 'rest_motion_ready', True) or self._rest_motion(analysis) > self.config.blank_motion_threshold:
             return False
         if analysis.knee_landmarks_valid:
             return bool(analysis.hands_on_knees)
@@ -439,9 +554,13 @@ class WebAutoTriggerEngine(AutoTriggerEngine):
         self.last_segment = result
         self._clear_rearm_window()
         self._end_onset_sec = None
+        self._end_hold.clear()
+        self._end_body = None
         return result
 
     def _clear_rearm_window(self) -> None:
+        self._rearm_hold.clear()
+        self._rearm_samples = []
         self._rearm_start_sec = None
         self._rearm_signatures = []
         self._rearm_wrist_signatures = []
@@ -462,7 +581,7 @@ class WebAutoTriggerEngine(AutoTriggerEngine):
                 return "calibrated_wrist_fallback"
             if not analysis.knee_landmarks_valid:
                 return "waiting_visible_knees"
-            if analysis.hands_on_knees and analysis.effective_motion_score > self.config.blank_motion_threshold:
+            if analysis.hands_on_knees and self._rest_motion(analysis) > self.config.blank_motion_threshold:
                 return "knee_pose_moving"
             return "visible_knee_rest" if analysis.hands_on_knees else "waiting_knee_return"
         if not self.calibrated:
@@ -474,6 +593,48 @@ class WebAutoTriggerEngine(AutoTriggerEngine):
         if analysis.rest_signature is None:
             return "pose_wrist_fallback"
         return "palm_and_wrist"
+
+    def calibration_diagnostics(self, analysis):
+        """Explain the actual gates, independent of presentation wording."""
+        blockers=[]
+        warming = analysis is None or not getattr(analysis,'rest_motion_ready',True)
+        motion = None if analysis is None else self._rest_motion(analysis)
+        rearming = self.state in {SEGMENT_STATE_REARMING,SEGMENT_STATE_COOLDOWN}
+        seeding = not self.calibrated or rearming
+        threshold = self.config.reference_seed_motion_threshold if seeding else self.config.blank_motion_threshold
+        if analysis is None or not analysis.torso_valid:
+            blockers.append('missing_pose')
+        if analysis is None or not analysis.wrists_detected:
+            blockers.append('missing_wrists')
+        if self.config.knee_gate_enabled:
+            if analysis is None or not analysis.knee_landmarks_valid:
+                blockers.append('knees_not_visible')
+            elif not analysis.hands_on_knees:
+                blockers.append('not_on_knees')
+        if warming:
+            blockers.append('motion_warming')
+        elif motion is not None and motion > threshold:
+            blockers.append('moving')
+        onset = self._rearm_start_sec if rearming else self._reference_seed_start_sec
+        target = self.config.adaptive_rearm_hold_sec if rearming else self.config.reference_seed_sec
+        hold = 0.0 if onset is None or self._last_timestamp_sec is None else max(0.,self._last_timestamp_sec-onset)
+        evidence = self._rearm_hold if rearming else self._seed_hold
+        if self.config.knee_gate_enabled:
+            hold = evidence.good_sec
+            if seeding and evidence.onset is not None and not evidence.previous_good:
+                blockers = ['motion_paused']
+        return dict(diagnostics_version=2, calibration_blockers=blockers,
+                    calibration_phase='rearm' if rearming else 'ready' if self.calibrated else 'initial',
+                    calibration_hold_sec=min(hold,target),calibration_target_sec=target,
+                    rest_motion_score=None if warming else motion,rest_motion_threshold=threshold,
+                    knee_zone_held=bool(analysis and analysis.hands_on_knees
+                        and getattr(analysis,'raw_hands_on_knees',None) is False),
+                    knee_region_margin=getattr(analysis,'knee_region_margin',None),
+                    segment_limit_sec=self.config.max_segment_sec,
+                    segment_elapsed_sec=(max(0., self._last_timestamp_sec-self.clip_start_sec)
+                        if self.state in {SEGMENT_STATE_ACTIVE,SEGMENT_STATE_END_CONFIRM}
+                        and self.clip_start_sec is not None and self._last_timestamp_sec is not None else 0.),
+                    wrists_trusted=bool(analysis and analysis.wrists_detected))
 
 
 class WebAutoKnee42Controller(AutoKnee42Controller):
@@ -495,6 +656,8 @@ class WebAutoKnee42Controller(AutoKnee42Controller):
         super().__init__(config, initial_mode=initial_mode, analysis_fn=analysis_fn)
         self.engine = WebAutoTriggerEngine(config)
         self.last_analysis = None
+        self._rest_motion_filter = KneeRestMotion()
+        self._knee_zone = KneeRestZone()
 
     @property
     def calibrated(self) -> bool:
@@ -514,10 +677,23 @@ class WebAutoKnee42Controller(AutoKnee42Controller):
         if trigger.shape != (225,):
             raise ValueError(f"expected 225 trigger values, got {trigger.shape}")
         if self.config.knee_gate_enabled:
+            was_on_knees = bool(self.last_analysis and self.last_analysis.hands_on_knees)
             trigger = sanitize_trigger(trigger, pose_visibility, self.config.pose_visibility_threshold)
+            trigger = align_trigger_hands(trigger)
             interval = 0 if self._last_timestamp is None else timestamp_sec - self._last_timestamp
             self.last_analysis = analyze_knee_frame(self._previous_trigger, trigger, self.config, interval,
                                                    visibility_available=pose_visibility is not None)
+            inside = self._knee_zone.update(timestamp_sec,self.last_analysis,self.config,
+                                            self.engine.reference_revision)
+            self.last_analysis = replace(self.last_analysis,hands_on_knees=inside)
+            if self.last_analysis.hands_on_knees and not was_on_knees:
+                # Measure stability of the new rest, not the preceding sign.
+                # Confirmation still requires fresh observations and end hold.
+                self._rest_motion_filter.reset()
+            rest_motion, ready = self._rest_motion_filter.update(timestamp_sec,trigger,self.config)
+            self.last_analysis = replace(self.last_analysis,rest_motion_score=rest_motion,rest_motion_ready=ready,
+                visible_rest_blank=bool(self.last_analysis.hands_on_knees and ready
+                                        and rest_motion <= self.config.blank_motion_threshold))
         else:
             self.last_analysis = self._analysis_fn(self._previous_trigger, trigger, self.config)
         self._previous_trigger = trigger.copy()
@@ -556,4 +732,6 @@ class WebAutoKnee42Controller(AutoKnee42Controller):
     def reset(self):
         result = super().reset()
         self.last_analysis = None
+        self._rest_motion_filter.reset()
+        self._knee_zone.reset()
         return result

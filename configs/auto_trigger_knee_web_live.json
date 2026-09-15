@@ -5,7 +5,7 @@
   "end_hold_sec": 0.5,
   "end_rest_vote_ratio": 0.8,
   "pre_roll_sec": 0.1,
-  "max_segment_sec": 5.0,
+  "max_segment_sec": 10.0,
   "min_segment_sec": 0.8,
   "cooldown_sec": 0.67,
   "torso_motion_weight": 0.35,
