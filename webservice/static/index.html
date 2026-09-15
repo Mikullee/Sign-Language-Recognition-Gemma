@@ -384,7 +384,9 @@ function loop(now) {
   $("s-hands").textContent = hands.length
     ? hands.map(h => h.handedness === "Left" ? "左" : "右").join(" + ") : "無";
   $("s-pose").textContent = shoulders ? "雙肩 OK" : "未偵測到";
-  $("s-mirror").textContent = lastMirror;
+  // Auto diagnostics own this field between server responses; do not erase
+  // them on every camera frame (which makes the status flash back to a dash).
+  if (camMode !== "auto") $("s-mirror").textContent = lastMirror;
   draw(hands, pose, shoulders);
 
   if (camMode === "auto" && camOn) {
