@@ -244,6 +244,8 @@
 <script type="module">
 import { FilesetResolver, HandLandmarker, PoseLandmarker }
   from "./vendor/mediapipe/vision_bundle.mjs";
+import {packLandmarks} from "./landmark_payload.mjs";
+import {createLandmarkers} from "./browser_tracker.mjs";
 
 "use strict";
 
@@ -295,20 +297,11 @@ const MAX_SECONDS = 20;
 
 const HAND_EDGES = [[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[5,9],[9,10],
   [10,11],[11,12],[9,13],[13,14],[14,15],[15,16],[13,17],[0,17],[17,18],[18,19],[19,20]];
-const POSE_EDGES = [[11,12],[11,13],[13,15],[12,14],[14,16],[11,23],[12,24],[23,24]];
+const POSE_EDGES = [[11,12],[11,13],[13,15],[12,14],[14,16],[11,23],[12,24],[23,24],[23,25],[24,26]];
 
 async function initModels() {
-  const vision = await FilesetResolver.forVisionTasks("vendor/mediapipe/wasm");
-  const mk = async (delegate) => [
-    await HandLandmarker.createFromOptions(vision, {
-      baseOptions: { modelAssetPath: "vendor/mediapipe/hand_landmarker.task", delegate },
-      runningMode: "VIDEO", numHands: 2 }),
-    await PoseLandmarker.createFromOptions(vision, {
-      baseOptions: { modelAssetPath: "vendor/mediapipe/pose_landmarker_lite.task", delegate },
-      runningMode: "VIDEO", numPoses: 1 }),
-  ];
-  try { [handLm, poseLm] = await mk("GPU"); }
-  catch (e) { console.warn("GPU delegate 失敗，改用 CPU：", e); [handLm, poseLm] = await mk("CPU"); }
+  try { [handLm, poseLm] = await createLandmarkers("GPU"); }
+  catch (e) { console.warn("GPU delegate 失敗，改用 CPU：", e); [handLm, poseLm] = await createLandmarkers("CPU"); }
 }
 
 async function startCam() {
@@ -383,14 +376,7 @@ function loop(now) {
     const pr = poseLm.detectForVideo(video, Math.round(now));
     // ★ 原始未鏡像座標 + Tasks API 原始 handedness，不做任何翻轉／交換。
     //   （已驗證：這正好等於訓練慣例「手語者的左 = +x」，伺服器 auto-mirror 會回 false）
-    hands = (hr.landmarks || []).map((lms, i) => ({
-      handedness: hr.handednesses?.[i]?.[0]?.categoryName || "Right",
-      score: +(hr.handednesses?.[i]?.[0]?.score ?? 1).toFixed(3),
-      landmarks: lms.map(p => [+p.x.toFixed(5), +p.y.toFixed(5), +p.z.toFixed(5)]),
-    }));
-    pose = pr.landmarks?.[0]
-      ? { landmarks: pr.landmarks[0].map(p => [+p.x.toFixed(5), +p.y.toFixed(5), +p.z.toFixed(5)]) }
-      : null;
+    ({hands, pose} = packLandmarks(hr, pr));
   } catch (e) { console.warn("detect 失敗", e); }
 
   const shoulders = !!(pose && pose.landmarks[11] && pose.landmarks[12]);
@@ -402,7 +388,7 @@ function loop(now) {
   draw(hands, pose, shoulders);
 
   if (camMode === "auto" && camOn) {
-    autoBuf.push({ pose, hands, timestamp: +((performance.now() - autoT0) / 1000).toFixed(4) });
+    autoBuf.push({ pose, hands, timestamp: +((now - autoT0) / 1000).toFixed(4) });
     if (autoBuf.length >= 6) flushAuto();
   }
 
@@ -465,8 +451,9 @@ function setMode(mode) {
   autoT0 = performance.now();
   if (mode === "auto") {
     badge.textContent = camOn ? "自動偵測：校準中…" : "未啟動";
-    say(camMsg, "自動模式：先擺好固定的休息姿勢並保持不動，等校準完成後直接比劃；" +
-                "每句結束後回到同一姿勢即可，不必按鍵。");
+    say(camMsg, "自動模式：請讓肩膀、髖部與膝蓋完整入鏡，雙手放回膝蓋並保持 1 秒；" +
+                "校準完成再比劃，每句結束後雙手回膝蓋重新定位，不必按鍵。 " +
+                '<a href="/replay.html" style="color:var(--accent)">用本機影片測試相同切段流程</a>');
     if (camOn) flushAuto(true);
   } else {
     badge.textContent = camOn ? "待機中" : "未啟動";
@@ -511,18 +498,23 @@ const REST_STATUS_TEXT = {
   missing_wrists: "手腕關鍵點不足",
   pose_wrist_fallback: "使用 Pose 手腕備援",
   palm_and_wrist: "雙手與手腕特徵可用",
+  waiting_knee_calibration: "膝蓋校準：雙手回膝蓋並保持 1 秒",
+  calibrated_wrist_fallback: "手腕備援（最多 1 秒，不更新基準）",
+  waiting_visible_knees: "膝蓋不明／備援已到期，請調整鏡頭",
+  visible_knee_rest: "已確認膝蓋回位",
+  waiting_knee_return: "比劃中／等待雙手回膝蓋",
+  knee_pose_moving: "手已接近膝蓋，但仍在移動",
 };
 
 function renderAutoState(j) {
-  // 靜止距離是自動模式唯一真正重要的診斷數字：段落要收尾，
-  // 它必須掉到門檻以下。看得到它才知道是「沒停」還是「停了但認不出來」。
+  // 距離只是診斷；完整回位還需要可信膝蓋／有限備援、雙腕與動作速度。
   const d = j.rest_distance, th = j.rest_threshold;
   let rest = "";
   if (d !== null && d !== undefined) {
-    const ok = d <= th;
+    const ok = j.rest_candidate === true;
     const colour = ok ? "var(--ok)" : "var(--err)";
     rest = ' · 靜止距離 <b style="color:' + colour + '">' + d.toFixed(3) + "</b> / " + th
-         + (ok ? " ✔ 已回到基準" : " ✘ 尚未回到基準");
+         + (ok ? " ✔ 已確認回位" : " ✘ 尚未符合回位條件");
   } else {
     const statusText = REST_STATUS_TEXT[j.rest_signature_status]
                     || j.rest_signature_status || "未知原因";
@@ -530,9 +522,15 @@ function renderAutoState(j) {
   }
   const hands = j.hands_detected === 2 ? "雙手" : j.hands_detected === 1 ? "僅單手" : "無";
   const revision = Number.isFinite(j.reference_revision) ? " · 基準版本 " + j.reference_revision : "";
-  $("s-mirror").innerHTML = "偵測 " + hands + rest + revision;
+  const gate = REST_STATUS_TEXT[j.rest_signature_status] || j.rest_signature_status || "";
+  const motion = Number.isFinite(j.motion_score) ? " · 動作速度 " + j.motion_score.toFixed(2) : "";
+  $("s-mirror").innerHTML = "偵測 " + hands + rest + revision + " · " + gate + motion;
+  if (j.last_message === "timeout_finalize" || j.last_message === "tracking_gap") {
+    say(camMsg, "本段未正常完成（" + (j.last_message === "tracking_gap" ? "影格中斷" : "超過時間上限")
+      + "），不送辨識。請雙手回膝蓋重新定位。", "err");
+  }
 
-  if (!j.calibrated) { badge.textContent = "自動偵測：校準中，請保持不動"; return; }
+  if (!j.calibrated) { badge.textContent = "膝蓋校準：請讓膝蓋入鏡，雙手回位保持 1 秒"; return; }
   badge.textContent = AUTO_STATE_TEXT[j.state] || j.state;
   badge.classList.toggle("rec", j.state === "SIGNING_ACTIVE");
 }

@@ -1,6 +1,7 @@
 # Mac 自動切段交接包
 
-這個私人 GitHub repository 的 prerelease ZIP 是目前 Web 自動切段的「調校候選版」，目的在讓 Apple Silicon Mac 直接接手現場測試。分類模型已包含在套件內，**不需要重訓**。
+這份文件描述完整私人交接 ZIP 的格式；含人物影片的 ZIP 尚待上傳授權，不能假設已能從 GitHub Release 下載。
+若已持有本機交接包，可依下列方式安裝。最新公開分支的膝蓋回位候選版請看 [新版操作說明](web_knee_candidate.md)，分類模型沿用、不需要重訓。
 
 完整 ZIP 含人物測試影片與 MediaPipe 官方二進位，只能放在 `Mikullee/Knee42-Private-Reproduction-Data` 的私人 Release。公開的 `Sign-Language-Recognition-Gemma` repository 只保存可審查的程式碼、模型與打包工具，不公開人物影片，也不直接散布 MediaPipe `.task`／WASM。
 

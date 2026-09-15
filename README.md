@@ -1,6 +1,6 @@
 # Sign-Language-Recognition-Gemma — Knee42
 
-> Apple Silicon Mac 要接手 Transformer v12 Web 自動切段調校，請使用私人資料 repository prerelease 的單一交接 ZIP，並依照 [`docs/mac_auto_trigger_handoff.md`](docs/mac_auto_trigger_handoff.md) 安裝與啟動。公開 repository 不含人物影片與 MediaPipe 二進位；候選包不需要重訓模型，且會明確保留尚未完成膝蓋入鏡驗收的限制。
+> **Web 膝蓋回位切段候選版**：見 [`docs/web_knee_candidate.md`](docs/web_knee_candidate.md)。已加入可見度檢查、低 FPS 時鐘修正、每句回位校準及同路徑影片回放；沿用 42 類 Transformer v12，無須重訓。真實膝蓋入鏡與跨人效果仍待實測，人物影片未上傳。
 
 > 42 類固定句型台灣手語辨識系統
 > 單一 RGB 攝影機 → MediaPipe 骨架 → Transformer encoder → Top-1／Top-3 中文句意

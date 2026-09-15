@@ -68,7 +68,7 @@ class WebAutoTriggerTests(unittest.TestCase):
         self.assertEqual(config.max_segment_sec, 5.0)
         self.assertTrue(config.adaptive_rearm_enabled)
         self.assertEqual(config.adaptive_rearm_hold_sec, 0.5)
-        self.assertFalse(config.adaptive_rearm_requires_knee_rest)
+        self.assertTrue(config.adaptive_rearm_requires_knee_rest)
 
     def test_adaptive_rearm_hold_must_be_non_negative(self):
         with self.assertRaisesRegex(ValueError, "Adaptive re-arm hold"):

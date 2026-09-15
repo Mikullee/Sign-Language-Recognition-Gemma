@@ -32,6 +32,7 @@ import tempfile
 import threading
 import time
 import uuid
+from dataclasses import asdict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -211,9 +212,20 @@ def frames_from_payload(raw_frames: list[dict]) -> list[TrackedFrame]:
                 timestamp=float(entry.get("timestamp", index / 30.0)),
                 pose=_points(entry.get("pose"), POSE_LANDMARKS),
                 hands=hands,
+                pose_visibility=_pose_visibility(entry.get("pose")),
             )
         )
     return frames
+
+
+def _pose_visibility(raw):
+    if not isinstance(raw, dict) or raw.get("visibility") is None:
+        return None
+    try:
+        values = np.asarray(raw["visibility"], dtype=np.float32)
+    except (TypeError, ValueError):
+        return None
+    return values if values.shape == (POSE_LANDMARKS,) else None
 
 
 def predict_payload(config: ServiceConfig, payload: dict) -> dict:
@@ -277,6 +289,8 @@ def _stream_session(session_id: str, trigger_config, *, reset: bool) -> dict[str
                 "segments": 0,
                 "last_timestamp": None,
                 "seen": time.time(),
+                "lock": threading.Lock(),
+                "failures": 0,
             }
             _STREAMS[session_id] = entry
         entry["seen"] = time.time()
@@ -286,40 +300,52 @@ def _stream_session(session_id: str, trigger_config, *, reset: bool) -> dict[str
 def stream_payload(config: "ServiceConfig", payload: dict) -> dict:
     """Feed one chunk of browser landmarks through this session's auto-trigger.
 
-    The browser cannot run this state machine: it is 700 lines of thresholds
-    calibrated on real sessions, and a JavaScript copy would drift from the one
-    the offline evaluation measures. So the page streams landmarks and the
-    decision stays here, on the same code path the CLI uses.
+    The browser sends genuine timestamped observations. This Web controller is
+    also used by recognition.evaluation.web_trigger_replay; it is deliberately
+    distinct from the immutable legacy controller. Strict knee settings remain
+    an engineering candidate until knee-protocol recordings validate them.
     """
-    from recognition.transformer.landmarks import observation_from_frame
-
     session_id = str(payload.get("session", ""))[:64] or "default"
     entry = _stream_session(session_id, config.trigger_config, reset=bool(payload.get("reset")))
+    with entry["lock"]:
+        return _stream_chunk(config, payload, session_id, entry)
+
+
+def _stream_chunk(config, payload, session_id, entry):
+    from recognition.transformer.landmarks import observation_from_frame
+
     controller = entry["controller"]
 
     results: list[dict] = []
-    last_analysis = None
+    last_analysis = controller.last_analysis
     last_hands = 0
+    events = []
+    discarded = 0
+    last_message = ""
     for frame in frames_from_payload(payload.get("frames") or []):
         timestamp = float(frame.timestamp)
         previous = entry["last_timestamp"]
+        if not np.isfinite(timestamp):
+            raise ValueError("Frame timestamps must be finite.")
         if previous is not None and timestamp <= previous:
-            timestamp = previous + 1e-3
-        interval = 1.0 / 30.0 if previous is None else max(timestamp - previous, 1e-3)
+            discarded += 1
+            continue
         entry["last_timestamp"] = timestamp
 
         observation = observation_from_frame(frame)
         last_hands = len(frame.hands)
-        event = controller.add_held_observation(
+        event = controller.add_observation(
             timestamp,
             observation.trigger_values,
             (observation.recognition_values, observation.recognition_mask),
-            frame_interval_sec=interval,
-            sample_count=1,
+            pose_visibility=frame.pose_visibility,
         )
-        last_analysis = controller._analysis_fn(
-            controller._previous_trigger, observation.trigger_values, controller.config
-        )
+        last_analysis = controller.last_analysis
+        last_message = event.message or last_message
+        if event.segment is not None:
+            events.append({"segment": asdict(event.segment), "accepted": event.infer, "message": event.message})
+            if not event.infer:
+                entry["failures"] += 1
         if not event.infer:
             continue
 
@@ -357,12 +383,8 @@ def stream_payload(config: "ServiceConfig", payload: dict) -> dict:
             }
         )
 
-    # Why a session never leaves SIGNING_ACTIVE is invisible without this.
-    # Rest is confirmed only when the distance to the calibrated reference falls
-    # under reference_rest_distance_threshold, and that reference is seeded once
-    # and never refreshed -- so a posture that drifts after the first sign can
-    # put the distance permanently out of reach. Reporting it turns that from a
-    # guess into something the page can display while signing.
+    if payload.get("eof"):
+        last_message = controller.finalize_video_eof(frame_interval_sec=1 / 30).message
     rest_distance = None
     if last_analysis is not None:
         rest_distance = controller.engine._reference_distance(last_analysis)
@@ -380,6 +402,13 @@ def stream_payload(config: "ServiceConfig", payload: dict) -> dict:
         "rearm_ready": bool(controller.engine._rearm_ready),
         "buffered": int(controller.buffered_observations),
         "results": results,
+        "events": events,
+        "failure_count": entry["failures"],
+        "discarded_frames": discarded,
+        "last_message": last_message,
+        "motion_score": None if last_analysis is None else last_analysis.effective_motion_score,
+        "knees_visible": bool(last_analysis and last_analysis.knee_landmarks_valid),
+        "rest_candidate": bool(last_analysis and controller.engine._is_rest_candidate(last_analysis)),
     }
 
 

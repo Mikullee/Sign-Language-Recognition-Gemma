@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="zh-Hant"><meta charset="utf-8"><meta name="viewport" content="width=device-width">
+<title>Knee42 自動切段影片回放</title>
+<style>body{font:17px system-ui;max-width:960px;margin:30px auto;padding:20px;background:#10202a;color:#eef5f7}a{color:#8edbff}button,input{font:inherit;padding:8px;margin:6px}video,canvas{width:46%;vertical-align:top;background:#000}pre{white-space:pre-wrap}label{display:inline-block}</style>
+<h1>自動切段影片回放</h1>
+<p><a href="/">返回即時辨識</a> · 使用相同的 Web MediaPipe VIDEO 模式與切段控制器。</p>
+<p>影片只在本機瀏覽器解碼；只送骨架至本機服務。膝蓋未入鏡時會等待校準，並非辨識失敗。</p>
+<input id="file" type="file" accept="video/*" disabled><label>取樣 FPS <input id="fps" type="number" value="30" min="10" max="60" step="0.5"></label>
+<button id="run" disabled>開始回放</button><button id="save" disabled>下載骨架與結果（私有）</button>
+<p id="status">先選取含「回位 → 比劃 → 回位」的影片。</p>
+<video id="source" controls muted playsinline></video><canvas id="frame"></canvas><pre id="result"></pre>
+<script type="module">
+import {assertLocalReplayOrigin} from './replay_origin.mjs';
+try {
+  assertLocalReplayOrigin(location.href);
+  await import('./replay.mjs');
+  document.getElementById('file').disabled = false;
+  document.getElementById('run').disabled = false;
+} catch (error) {
+  document.getElementById('status').textContent = error.message;
+}
+</script></html>
