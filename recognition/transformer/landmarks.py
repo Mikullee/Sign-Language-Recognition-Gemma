@@ -51,6 +51,8 @@ class TrackedFrame:
     timestamp: float
     pose: np.ndarray | None = None
     hands: dict[str, np.ndarray] = field(default_factory=dict)
+    # Trigger-only confidence metadata; never enters the 219-value model input.
+    pose_visibility: np.ndarray | None = None
 
     def wrist(self, side: str) -> np.ndarray | None:
         landmarks = self.hands.get(side)

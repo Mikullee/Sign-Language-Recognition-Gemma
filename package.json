@@ -1,0 +1,10 @@
+{
+  "name": "knee42-web-trigger-evaluation",
+  "private": true,
+  "scripts": {
+    "test": "node --test tests/web_*.test.*"
+  },
+  "devDependencies": {
+    "playwright": "1.62.1"
+  }
+}

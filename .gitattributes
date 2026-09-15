@@ -7,3 +7,6 @@ recognition/realtime/knee42_controllers.py text eol=lf
 # Transformer bundle text is pinned by SHA-256; keep checkout bytes stable.
 artifacts/realtime/best_current/*.json text eol=lf
 artifacts/realtime/best_current/integrity_manifest.sha256 text eol=lf
+
+# macOS launch scripts must not be checked out with Windows CRLF endings.
+scripts/*.sh text eol=lf

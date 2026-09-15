@@ -1,13 +1,23 @@
 # 瀏覽器測試服務
 
+目前交接使用精簡介面版 `web-final-20260915-ui1`；下載、安裝與替換既有 Web 請先看 [最終換版說明](../docs/web_final_handoff_20260915.md)。辨識、切段及參數與 `web-final-20260915` 相同；歷史候選版操作與批次評估見 [候選版說明](../docs/web_knee_candidate.md)。
+`/replay.html` 使用與相機相同的 Web VIDEO 模式和切段控制器；下方舊的上傳影片分析是另一種分析功能，不能用來驗收新版自動觸發。
+
 讓別人不用安裝任何東西就能試模型的網頁。三種輸入:攝影機、上傳影片、貼影片連結。
 
 ```bash
 python -m webservice.server --port 8642
 ```
 
-開 `https://<主機>:8642`。**必須是 https**——瀏覽器只在安全來源提供 `getUserMedia`,
-純 http 的頁面連要求攝影機權限的機會都沒有。
+開 `https://<主機>:8642`。瀏覽器只在安全來源提供 `getUserMedia`。若只在同一台
+電腦測試，可免憑證啟動：
+
+```bash
+python -m webservice.server --host 127.0.0.1 --port 8642 --http
+```
+
+再開 `http://127.0.0.1:8642`；localhost 是瀏覽器認可的安全來源。`--http` 會拒絕
+`0.0.0.0`、區網 IP 與網域名稱，不能用它把未加密服務開給其他電腦。
 
 ## 啟動前需要的東西
 
@@ -16,7 +26,7 @@ python -m webservice.server --port 8642
 | 模型 bundle | 預設讀 `artifacts/realtime/best_current/`,repo 內附 |
 | MediaPipe `.task` | 放在 `models/`(見 [`models/README.md`](../models/README.md)) |
 | MediaPipe 網頁資產 | 攝影機模式需要,見下方 |
-| TLS 憑證 | 第一次啟動會用 `openssl` 自簽;沒有 openssl 就用 `--certfile` / `--keyfile` 自備 |
+| TLS 憑證 | 區網使用時需要；第一次啟動會用 `openssl` 自簽，沒有 openssl 就用 `--certfile` / `--keyfile` 自備；本機可用 `--http` |
 
 ### MediaPipe 網頁資產
 
@@ -53,16 +63,17 @@ vendor/mediapipe/
 | 模式 | 操作 |
 |---|---|
 | **手動**(預設) | 按住空白鍵錄 1–3 秒,放開出結果 |
-| **自動偵測** | 站好等校準完成,直接比劃,比完把手放回身側,不必按鍵 |
+| **自動偵測** | 膝蓋完整入鏡，雙手回膝蓋穩定約 1 秒校準；每句結束後回膝蓋重新定位 |
 
 MediaPipe 在瀏覽器端執行,**只有骨架座標會 POST 給伺服器,畫面不會離開使用者的電腦**。
 
 自動模式的**起訖判定在伺服器上**,走 `POST /stream`:頁面每 400 毫秒把累積的
-landmark 送上去,伺服器用 `recognition.realtime.auto_trigger` 那套已校準的狀態機決定
-邊界,段落結束時連同 top-5 一起回傳。
+landmark 送上去。伺服器以封存的 `recognition.realtime.auto_trigger` 為基底，透過
+`recognition.transformer.live_trigger` 加入目前 Web 專用的重新校準與 Pose 手腕備援；
+段落結束時連同 top-5 一起回傳。舊 V13 的受雜湊鎖定程式碼不會被改寫。
 
-**狀態機刻意不在瀏覽器重寫。** 它是七百行、在真實錄影上校準過的門檻,
-JavaScript 版本必然會跟離線評估所量測的那一份漂掉。頁面只負責送資料和顯示。
+**狀態機不在瀏覽器重寫。** 回放與即時串流共用 Python 控制器；頁面只負責抽骨架、送資料和顯示。
+目前設定已由使用者在其 Chrome／攝影機環境試用並接受為最終版基準；不同人物與其他部署環境仍需驗收，不能宣稱已完成跨人量化驗證。
 
 伺服器為每個分頁維持一份狀態機(它要校準靜止基準、還要保留 pre-roll 緩衝,
 不能每次請求重建),閒置五分鐘回收。

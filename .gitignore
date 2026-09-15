@@ -26,6 +26,7 @@ data/results/
 data/cache/
 session_logs/
 .venv/
+node_modules/
 venv/
 env/
 ENV/
