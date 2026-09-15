@@ -13,8 +13,14 @@ function between(start, end) {
 }
 function element() {
   let content = '';
+  const attributes = new Map();
   return {
     dataset: {},
+    set value(value) {attributes.set('value',String(value));},
+    get value() {return Number(attributes.get('value') ?? 0);},
+    setAttribute(name,value) {attributes.set(name,String(value));},
+    getAttribute(name) {return attributes.get(name) ?? null;},
+    removeAttribute(name) {attributes.delete(name);},
     set textContent(value) { content = String(value); },
     get textContent() { return content.replace(/<[^>]*>/g, ''); },
     set innerHTML(value) { content = String(value); },
@@ -89,12 +95,12 @@ test('a camera frame must not erase the latest automatic diagnostics', () => {
   context.renderAutoState({calibrated: false, rest_distance: null,
     rest_signature_status: 'waiting_visible_knees', hands_detected: 0, reference_revision: 0,
     calibration_blockers:['knees_not_visible']});
-  const status = $('auto-reason').textContent;
+  const status = context.badge.textContent;
   assert.match(status, /膝蓋/);
   for (let i = 0; i < 30; i++) {
     context.video.currentTime += 1 / 30;
     context.loop(1000 + i * 1000 / 30);
-    assert.equal($('auto-reason').textContent, status);
+    assert.equal(context.badge.textContent, status);
   }
 });
 
@@ -113,15 +119,103 @@ test('automatic diagnostics have separate immediate fields instead of a rewritte
     calibration_blockers:['not_on_knees'],calibration_hold_sec:0,calibration_target_sec:1,wrists_trusted:true};
   context.renderAutoState(state);
   assert.equal($('s-mirror').textContent,'固定鏡像慣例');
-  assert.match($('auto-reason').textContent,/膝蓋/);
+  assert.match(context.badge.textContent,/膝蓋/);
   assert.match($('auto-distance').textContent,/未建立基準/);
   assert.equal($('auto-motion').textContent,'0.09 / 0.15');
-  assert.doesNotMatch($('auto-reason').textContent,/算不出來/);
+  assert.doesNotMatch(context.badge.textContent,/算不出來/);
   context.renderAutoState({...state,calibration_blockers:[],rest_motion_score:.04,calibration_hold_sec:.6});
   assert.equal($('auto-motion').textContent,'0.04 / 0.15');
   assert.match($('auto-hold').textContent,/0.60/);
-  assert.match($('auto-reason').textContent,/保持/);
+  assert.match(context.badge.textContent,/保持/);
 });
+
+test('compact diagnostics keep three primary fields and collapse engineering details',()=>{
+  const primary=between('<div id="auto-diagnostics"','<details id="advanced-diagnostics"');
+  for(const id of ['auto-tracking','auto-motion','auto-hold','auto-hold-progress']) assert(primary.includes(`id="${id}"`));
+  assert.doesNotMatch(primary,/id="auto-(reason|distance|reference)"|id="s-fps"/);
+  assert.match(primary,/<div id="auto-duration-row"[^>]*hidden/);
+  const advanced=between('<details id="advanced-diagnostics"','</details>');
+  assert.doesNotMatch(advanced.split('>')[0],/\bopen\b/);
+  for(const id of ['s-fps','auto-distance','auto-reference']) assert(advanced.includes(`id="${id}"`));
+  assert.match(advanced,/<summary>進階診斷<\/summary>/);
+});
+
+test('duration appears only while signing or confirming the end',()=>{
+  const {context,$}=runtime('auto');
+  for(const [state,visible] of [['IDLE_BLANK',false],['SIGNING_ACTIVE',true],['END_CONFIRM',true],
+    ['COOLDOWN',false],['REARMING',false],['FORCED_FINALIZE_COOLDOWN',false]]){
+    context.renderAutoState({calibrated:true,state,segment_elapsed_sec:2.4,segment_limit_sec:10});
+    assert.equal($('auto-duration-row').hidden,!visible,state);
+  }
+});
+
+test('hold progress uses observed initial and rearm evidence and clamps malformed values',()=>{
+  const {context,$}=runtime('auto');
+  const initial={calibrated:false,calibration_hold_sec:.6,calibration_target_sec:1,calibration_blockers:[]};
+  context.renderAutoState(initial);
+  assert.equal($('auto-hold-progress').value,.6);
+  assert.equal($('auto-hold-progress').max,1);
+  assert.equal($('auto-hold-progress').hidden,false);
+  context.renderAutoState({...initial,calibrated:true,state:'REARMING',calibration_phase:'rearm',
+    calibration_hold_sec:.25,calibration_target_sec:.5});
+  assert.equal($('auto-hold-progress').value,.25);
+  assert.equal($('auto-hold-progress').max,.5);
+  assert.match($('auto-hold').textContent,/0.25 \/ 0.50/);
+  context.renderAutoState({...initial,calibration_hold_sec:8,calibration_target_sec:0});
+  assert.equal($('auto-hold-progress').max,1);
+  assert.equal($('auto-hold-progress').value,1);
+});
+
+test('end confirmation does not fabricate progress from the initial calibration hold',()=>{
+  const {context,$}=runtime('auto');
+  context.renderAutoState({calibrated:true,state:'SIGNING_ACTIVE',calibration_hold_sec:1});
+  assert.equal($('auto-hold-progress').hidden,true);
+  context.renderAutoState({calibrated:true,state:'END_CONFIRM',calibration_hold_sec:1});
+  assert.equal($('auto-hold-progress').hidden,false);
+  assert.equal($('auto-hold-progress').getAttribute('value'),null);
+  assert.match($('auto-hold').textContent,/回位確認中/);
+});
+
+test('primary tracking includes missing torso and does not assume unknown torso is trusted',()=>{
+  const {context,$}=runtime('auto');
+  context.renderAutoState({calibrated:false,calibration_blockers:['missing_pose'],wrists_trusted:true,knees_visible:true});
+  assert.match($('auto-tracking').textContent,/肩／髖不足/);
+  assert.match(context.badge.textContent,/肩膀／髖部追蹤不足/);
+  context.renderAutoState({calibrated:true,state:'IDLE_BLANK',calibration_blockers:[],wrists_trusted:true,knees_visible:true});
+  assert.match($('auto-tracking').textContent,/肩／髖可用/);
+  context.renderAutoState({calibrated:false});
+  assert.match($('auto-tracking').textContent,/肩／髖待確認/);
+});
+
+test('switching back to automatic mode clears the previous session display',()=>{
+  const {context,$}=runtime('auto');
+  Object.assign(context,{camOn:false,document:{querySelectorAll:()=>[]},recBtn:{style:{}},
+    performance:{now:()=>1000},autoSession:'old',autoSeen:1,autoT0:0});
+  vm.runInContext(between('function setMode(', 'async function flushAuto('),context);
+  context.renderAutoState({calibrated:true,state:'SIGNING_ACTIVE',rest_motion_score:.3,
+    rest_motion_threshold:.15,segment_elapsed_sec:8,segment_limit_sec:10,reference_revision:4});
+  context.setMode('manual');
+  assert.equal($('auto-diagnostics').hidden,true);
+  assert.equal($('auto-advanced').hidden,true);
+  context.setMode('auto');
+  assert.equal($('auto-duration-row').hidden,true);
+  assert.equal($('auto-hold-progress').value,0);
+  assert.equal($('auto-hold-progress').hidden,false);
+  assert.equal($('auto-reference').textContent,'0');
+  assert.match($('auto-tracking').textContent,/等待/);
+});
+
+for(const tagName of ['SUMMARY','BODY']){
+  test(`Space on ${tagName} ${tagName==='SUMMARY'?'keeps native disclosure behavior':'still records manually'}`,()=>{
+    const calls={start:0,stop:0,prevented:0}, handlers={};
+    const context=vm.createContext({camMode:'manual',addEventListener:(type,fn)=>handlers[type]=fn,
+      $:()=>({classList:{contains:()=>true}}),startRec:()=>calls.start++,stopRec:()=>calls.stop++});
+    vm.runInContext(between('addEventListener("keydown",','async function sendCam('),context);
+    const event={code:'Space',repeat:false,target:{tagName},preventDefault:()=>calls.prevented++};
+    handlers.keydown(event); handlers.keyup(event);
+    assert.deepEqual(calls,tagName==='SUMMARY'?{start:0,stop:0,prevented:0}:{start:1,stop:1,prevented:2});
+  });
+}
 
 for (const failed of [false,true]) {
   test(`late stream ${failed?'error':'response'} cannot restore automatic UI after a mode change`,async()=>{

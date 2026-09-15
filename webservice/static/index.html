@@ -34,7 +34,8 @@
   #stage{position:relative;background:#000;border-radius:10px;overflow:hidden;aspect-ratio:16/9}
   #view{width:100%;height:100%;display:block}
   #badge{position:absolute;top:10px;left:10px;background:rgba(0,0,0,.62);
-         padding:4px 10px;border-radius:999px;font-size:12px;color:var(--dim)}
+         padding:4px 10px;border-radius:12px;font-size:12px;color:var(--fg);
+         max-width:calc(100% - 20px);overflow-wrap:anywhere}
   #badge.rec{color:#fff;background:rgba(248,81,73,.85);font-weight:600}
   #overlay-msg{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
        text-align:center;padding:24px;color:var(--dim);font-size:14px;background:rgba(0,0,0,.5)}
@@ -59,12 +60,15 @@
   #status b{color:var(--fg);font-weight:600}
   #auto-diagnostics{margin-top:10px;padding:10px;border:1px solid var(--line);border-radius:8px;
                     display:grid;gap:4px;font-size:13px;font-variant-numeric:tabular-nums}
-  #auto-diagnostics[hidden]{display:none}
+  #auto-diagnostics[hidden],#auto-advanced[hidden],.auto-line[hidden],#auto-hold-progress[hidden]{display:none}
   .auto-line{display:grid;grid-template-columns:92px minmax(0,1fr);gap:8px;align-items:baseline}
   .auto-line>span{color:var(--dim)}
-  #auto-reason{min-height:3.2em;overflow-wrap:anywhere}
   .auto-number{white-space:nowrap;min-width:12ch}
   .auto-good{color:var(--ok)}
+  #auto-hold-progress{display:block;width:100%;height:7px;margin-top:5px;accent-color:var(--accent)}
+  #advanced-diagnostics{margin-top:8px;font-size:12px;color:var(--dim)}
+  #advanced-diagnostics summary{cursor:pointer;width:fit-content}
+  #auto-advanced{display:grid;gap:4px;margin-top:6px}
   .msg{margin-top:10px;font-size:13px;min-height:20px}
   .msg.err{color:var(--err)} .msg.ok{color:var(--ok)} .msg.hint{color:var(--dim)}
 
@@ -184,22 +188,28 @@
             cursor:pointer;background:none;color:var(--fg)">自動偵測</button>
         </span>
       </div>
-      <div id="status">
-        <span>FPS <b id="s-fps">—</b></span>
-        <span>偵測到的手 <b id="s-hands">—</b></span>
-        <span>上半身 <b id="s-pose">—</b></span>
-        <span id="mirror-status">鏡像判定 <b id="s-mirror">—</b></span>
-      </div>
-
       <div id="auto-diagnostics" hidden data-version="2">
-        <div class="auto-line"><span>目前狀態</span><b id="auto-reason">等待追蹤資料</b></div>
         <div class="auto-line"><span>骨架追蹤</span><b id="auto-tracking">—</b></div>
         <div class="auto-line"><span>靜止速度／上限</span><b id="auto-motion" class="auto-number">—</b></div>
-        <div class="auto-line"><span>校準保持</span><b id="auto-hold" class="auto-number">—</b></div>
-        <div class="auto-line"><span>本句時間／上限</span><b id="auto-duration" class="auto-number">—</b></div>
-        <div class="auto-line"><span>回位距離</span><b id="auto-distance">未建立基準</b></div>
-        <div class="auto-line"><span>基準版本</span><b id="auto-reference" class="auto-number">0</b></div>
+        <div class="auto-line"><span>保持進度</span><div>
+          <b id="auto-hold" class="auto-number">—</b>
+          <progress id="auto-hold-progress" max="1" value="0" aria-label="校準與回位保持進度"></progress>
+        </div></div>
+        <div id="auto-duration-row" class="auto-line" hidden><span>本句時間／上限</span><b id="auto-duration" class="auto-number">—</b></div>
       </div>
+      <details id="advanced-diagnostics">
+        <summary>進階診斷</summary>
+        <div id="status">
+          <span>FPS <b id="s-fps">—</b></span>
+          <span>偵測到的手 <b id="s-hands">—</b></span>
+          <span>上半身 <b id="s-pose">—</b></span>
+          <span id="mirror-status">鏡像判定 <b id="s-mirror">—</b></span>
+        </div>
+        <div id="auto-advanced" hidden>
+          <div class="auto-line"><span>回位距離</span><b id="auto-distance">未建立基準</b></div>
+          <div class="auto-line"><span>基準版本</span><b id="auto-reference" class="auto-number">0</b></div>
+        </div>
+      </details>
       <div id="cam-msg" class="msg hint">
         按住 <kbd>空白鍵</kbd> 錄影、放開結束；或直接點大按鈕開始／停止。
         比劃時請讓<b>兩邊肩膀</b>都在畫面內。
@@ -460,6 +470,8 @@ function setMode(mode) {
   if (recording) stopRec();
   camMode = mode;
   $("auto-diagnostics").hidden = mode !== "auto";
+  $("auto-advanced").hidden = mode !== "auto";
+  $("auto-duration-row").hidden = true;
   $("mirror-status").hidden = mode === "auto";
   document.querySelectorAll("#mode-switch .msw").forEach(b => {
     const on = b.dataset.mode === mode;
@@ -472,6 +484,14 @@ function setMode(mode) {
   autoSession = Math.random().toString(36).slice(2) + Date.now().toString(36);
   autoT0 = performance.now();
   if (mode === "auto") {
+    $("auto-tracking").textContent = "等待追蹤資料";
+    $("auto-motion").textContent = "量測中";
+    $("auto-hold").textContent = "等待回位校準";
+    $("auto-distance").textContent = "未建立基準";
+    $("auto-reference").textContent = "0";
+    const progress = $("auto-hold-progress");
+    progress.max = 1; progress.value = 0; progress.hidden = false;
+    progress.setAttribute("aria-valuetext",$("auto-hold").textContent);
     badge.textContent = camOn ? "自動偵測：校準中…" : "未啟動";
     say(camMsg, "自動模式：請讓肩膀、髖部與膝蓋完整入鏡，雙手放回膝蓋並保持 1 秒；" +
                 "校準完成再比劃，每句結束後雙手回膝蓋重新定位，不必按鍵。 " +
@@ -546,6 +566,7 @@ const AUTO_BLOCKER_TEXT = {
 function renderAutoState(j) {
   // Each field updates on every response; no UI timer or hidden state changes.
   $("auto-diagnostics").hidden = false;
+  $("auto-advanced").hidden = false;
   $("mirror-status").hidden = true;
   const d = j.rest_distance, th = j.rest_threshold;
   const ok = j.rest_candidate === true;
@@ -553,25 +574,37 @@ function renderAutoState(j) {
     + (ok ? " · 已確認回位" : " · 尚未確認回位") : j.calibrated ? "等待可信手腕" : "未建立基準";
   $("auto-distance").classList.toggle("auto-good",ok);
   $("auto-reference").textContent = String(j.reference_revision ?? 0);
-  $("auto-tracking").textContent = (j.wrists_trusted ? "雙手腕可用" : "手腕不足")
+  const blockers = j.calibration_blockers || [];
+  const torso = Array.isArray(j.calibration_blockers)
+    ? blockers.includes("missing_pose") ? "肩／髖不足" : "肩／髖可用" : "肩／髖待確認";
+  $("auto-tracking").textContent = torso + " · " + (j.wrists_trusted ? "雙手腕可用" : "手腕不足")
     + " · " + (j.knees_visible ? "雙膝可用" : "膝蓋不足");
   $("auto-motion").textContent = Number.isFinite(j.rest_motion_score) && Number.isFinite(j.rest_motion_threshold)
     ? j.rest_motion_score.toFixed(2) + " / " + j.rest_motion_threshold.toFixed(2) : "量測中";
   const limit = Number.isFinite(j.segment_limit_sec) ? j.segment_limit_sec : null;
   const elapsed = Number.isFinite(j.segment_elapsed_sec) ? j.segment_elapsed_sec : 0;
   $("auto-duration").textContent = limit === null ? "—" : elapsed.toFixed(1) + " / " + limit + " 秒";
-  const hold = Number.isFinite(j.calibration_hold_sec) ? j.calibration_hold_sec : 0;
-  const target = Number.isFinite(j.calibration_target_sec) ? j.calibration_target_sec : 1;
+  const signing = j.state === "SIGNING_ACTIVE", confirming = j.state === "END_CONFIRM";
+  $("auto-duration-row").hidden = !(signing || confirming);
+  const target = Number.isFinite(j.calibration_target_sec) && j.calibration_target_sec > 0 ? j.calibration_target_sec : 1;
+  const hold = Number.isFinite(j.calibration_hold_sec) ? Math.max(0,Math.min(target,j.calibration_hold_sec)) : 0;
   const rearming = j.calibration_phase === "rearm" || j.state === "REARMING";
-  $("auto-hold").textContent = j.calibrated && !rearming ? "已建立基準"
+  $("auto-hold").textContent = signing ? "完成後請雙手回膝蓋" : confirming ? "回位確認中，請保持"
+    : j.calibrated && !rearming ? "已建立基準"
     : hold.toFixed(2) + " / " + target.toFixed(2) + " 秒";
-  const blockers = j.calibration_blockers || [];
+  const progress = $("auto-hold-progress");
+  progress.hidden = signing;
+  progress.max = target;
+  // The API reports initial/rearm holds, not end-confirmation progress.
+  // Show an indeterminate indicator for the latter instead of inventing a percentage.
+  if (confirming) progress.removeAttribute("value");
+  else progress.value = j.calibrated && !rearming ? target : hold;
+  progress.setAttribute("aria-valuetext",$("auto-hold").textContent);
   const reason = !j.calibrated || rearming
     ? blockers.length ? AUTO_BLOCKER_TEXT[blockers[0]] || "等待可信回位資料"
       : "回位已確認，請繼續保持完成校準"
     : (AUTO_STATE_TEXT[j.state] || j.state || "待命") + " · "
       + (REST_STATUS_TEXT[j.rest_signature_status] || "");
-  $("auto-reason").textContent = reason;
   if (j.last_message === "timeout_finalize" || j.last_message === "tracking_gap") {
     camMsg.dataset.autoWarningRevision = String(j.reference_revision ?? 0);
     const failure = j.last_message === "tracking_gap" ? "影格中斷"
@@ -586,7 +619,7 @@ function renderAutoState(j) {
   }
 
   if (!j.calibrated) { badge.textContent = reason; badge.classList.toggle("rec",false); return; }
-  badge.textContent = AUTO_STATE_TEXT[j.state] || j.state;
+  badge.textContent = reason;
   badge.classList.toggle("rec", j.state === "SIGNING_ACTIVE");
 }
 
@@ -643,13 +676,13 @@ addEventListener("keydown", e => {
   if (camMode === "auto") return;                       // 自動模式不吃空白鍵
   if (e.code !== "Space" || e.repeat || !$("pane-cam").classList.contains("on")) return;
   if (e.target.tagName === "BUTTON") e.target.blur();
-  if (/INPUT|TEXTAREA/.test(e.target.tagName)) return;
+  if (/^(INPUT|TEXTAREA|SUMMARY)$/.test(e.target.tagName)) return;
   e.preventDefault(); startRec();
 });
 addEventListener("keyup", e => {
   if (camMode === "auto") return;
   if (e.code !== "Space" || !$("pane-cam").classList.contains("on")) return;
-  if (/INPUT|TEXTAREA/.test(e.target.tagName)) return;
+  if (/^(INPUT|TEXTAREA|SUMMARY)$/.test(e.target.tagName)) return;
   e.preventDefault(); stopRec();
 });
 
